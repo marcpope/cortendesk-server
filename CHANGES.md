@@ -39,6 +39,13 @@ Added `tests/signalling_handshake.rs` (end-to-end against a real `hbbs` process,
 covering both a signed-in and a signed-out client) and unit tests in
 `src/rendezvous_server.rs`.
 
+### Removed the daily update check (`src/common.rs`, `src/main.rs`)
+
+`hbbs` polled RustDesk's release feed once a day and logged when a newer
+rustdesk-server existed. It compared their version numbers against ours, so a
+current build reported itself as out of date, and it made a daily outbound
+request to a third party that a self-hosted server has no reason to make.
+
 ### Naming
 
 - Product name, author string and `--help` descriptions changed from RustDesk's

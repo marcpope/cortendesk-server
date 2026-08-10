@@ -28,6 +28,7 @@ use std::{
 // against another server's key. hbbs also claims port-1 and port+2.
 const PORT_SECURED: i32 = 31116;
 const PORT_PLAIN: i32 = 31126;
+const PORT_WS: i32 = 31136;
 
 /// A running hbbs that is killed when the test ends, however it ends.
 struct Hbbs(Child);
@@ -41,7 +42,24 @@ impl Drop for Hbbs {
 
 /// Start hbbs in a scratch directory and wait until it announces its key.
 /// Returns the server's public key, which is what a client is configured with.
-fn start_hbbs(dir: &std::path::Path, port: i32) -> (Hbbs, sign::PublicKey, String) {
+///
+/// Set `TEST_HBBS_ADDR` (`host:port`) and `TEST_HBBS_KEY` (its public key) to
+/// run these checks against a server that is already running instead — a
+/// container, or a real deployment you want to verify.
+fn start_hbbs(dir: &std::path::Path, port: i32) -> (Option<Hbbs>, sign::PublicKey, String) {
+    if let (Ok(_), Ok(key)) = (
+        std::env::var("TEST_HBBS_ADDR"),
+        std::env::var("TEST_HBBS_KEY"),
+    ) {
+        let raw = base64::decode(&key).expect("TEST_HBBS_KEY is base64");
+        let pk = sign::PublicKey::from_slice(&raw).expect("TEST_HBBS_KEY is a public key");
+        return (None, pk, key);
+    }
+    let (child, pk, key) = spawn_hbbs(dir, port);
+    (Some(child), pk, key)
+}
+
+fn spawn_hbbs(dir: &std::path::Path, port: i32) -> (Hbbs, sign::PublicKey, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_hbbs"))
         .current_dir(dir)
         .args(["-p", &port.to_string(), "-k", "_"])
@@ -68,13 +86,14 @@ fn start_hbbs(dir: &std::path::Path, port: i32) -> (Hbbs, sign::PublicKey, Strin
 }
 
 async fn connect(port: i32) -> Framed<TcpStream, BytesCodec> {
+    let addr = std::env::var("TEST_HBBS_ADDR").unwrap_or(format!("127.0.0.1:{port}"));
     for _ in 0..100 {
-        if let Ok(s) = TcpStream::connect(("127.0.0.1", port as u16)).await {
+        if let Ok(s) = TcpStream::connect(&addr).await {
             return Framed::new(s, BytesCodec::new());
         }
         sleep(Duration::from_millis(100)).await;
     }
-    panic!("hbbs never accepted a connection on {port}");
+    panic!("hbbs never accepted a connection on {addr}");
 }
 
 /// Client half of the exchange: verify the server's signed throwaway key, mint
@@ -190,4 +209,41 @@ async fn plain_client_is_unaffected_by_the_offer() {
         break;
     }
     assert_id_not_exist(&response.expect("a non key exchange reply"));
+}
+
+/// The WebSocket path must stay silent. Clients skip this exchange there —
+/// the transport already handles encryption — so an offer on that port would
+/// arrive unasked for and confuse an in-browser client.
+#[tokio::test]
+async fn websocket_clients_are_not_offered_an_exchange() {
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let (_hbbs, _server_pk, server_key) = start_hbbs(dir.path(), PORT_WS);
+    // hbbs serves the rendezvous protocol over WebSocket on its port + 2.
+    let url = format!("ws://127.0.0.1:{}", PORT_WS + 2);
+
+    let mut ws = None;
+    for _ in 0..100 {
+        if let Ok((s, _)) = connect_async(&url).await {
+            ws = Some(s);
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    let (mut sink, mut stream) = ws.expect("websocket connects").split();
+
+    if let Ok(Some(frame)) = hbb_common::timeout(500, stream.next()).await {
+        panic!("nothing should be sent unprompted over websocket, got {frame:?}");
+    }
+
+    // And normal signalling still works on that transport.
+    let request = punch_hole_request("", &server_key);
+    sink.send(Message::Binary(request.write_to_bytes().unwrap()))
+        .await
+        .expect("request sent");
+    match stream.next().await.expect("a reply").expect("reply read") {
+        Message::Binary(bytes) => assert_id_not_exist(&bytes),
+        other => panic!("expected a binary frame, got {other:?}"),
+    }
 }
