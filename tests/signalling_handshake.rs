@@ -221,7 +221,14 @@ async fn websocket_clients_are_not_offered_an_exchange() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let (_hbbs, _server_pk, server_key) = start_hbbs(dir.path(), PORT_WS);
     // hbbs serves the rendezvous protocol over WebSocket on its port + 2.
-    let url = format!("ws://127.0.0.1:{}", PORT_WS + 2);
+    let (host, port) = match std::env::var("TEST_HBBS_ADDR") {
+        Ok(addr) => {
+            let (h, p) = addr.rsplit_once(':').expect("TEST_HBBS_ADDR is host:port");
+            (h.to_owned(), p.parse::<i32>().expect("port is a number"))
+        }
+        Err(_) => ("127.0.0.1".to_owned(), PORT_WS),
+    };
+    let url = format!("ws://{host}:{}", port + 2);
 
     let mut ws = None;
     for _ in 0..100 {
