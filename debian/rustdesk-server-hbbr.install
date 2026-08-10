@@ -1,2 +1,0 @@
-bin/hbbr usr/bin
-systemd/rustdesk-hbbr.service lib/systemd/system

@@ -1,0 +1,27 @@
+CortenDesk Server
+=================
+
+This program is a modified version of rustdesk-server:
+
+    https://github.com/rustdesk/rustdesk-server
+
+Copyright of the original work belongs to its authors (Purslane Ltd. and
+contributors). It is licensed under the GNU Affero General Public License,
+version 3, and so is this modified version. The full licence text is in LICENSE.
+
+The modifications made here, and the dates they were made, are listed in
+CHANGES.md, as required by section 5(a) of that licence. Complete corresponding
+source for this program — including these modifications — is published at:
+
+    https://github.com/marcpope/cortendesk-server
+
+libs/hbb_common is a git submodule of https://github.com/rustdesk/hbb_common and
+is used unmodified.
+
+Trademarks
+----------
+
+RustDesk is a trademark of its owners. The AGPL grants no rights to it, and none
+are claimed here. This project is not affiliated with, endorsed by, or supported
+by the RustDesk project. The RustDesk name appears in this software and its
+documentation only to state, factually, which clients it works with.

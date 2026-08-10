@@ -1,7 +1,10 @@
 [package]
 name = "hbbs"
-version = "1.1.16"
-authors = ["rustdesk <info@rustdesk.com>"]
+version = "1.0.0"
+authors = ["CortenDesk"]
+license = "AGPL-3.0-only"
+description = "ID/rendezvous and relay servers for RustDesk clients, with encrypted signalling. A fork of rustdesk-server."
+repository = "https://github.com/marcpope/cortendesk-server"
 edition = "2021"
 build = "build.rs"
 default-run = "hbbs"
@@ -11,7 +14,7 @@ name = "hbbr"
 path = "src/hbbr.rs"
 
 [[bin]]
-name = "rustdesk-utils"
+name = "cortendesk-utils"
 path = "src/utils.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -59,6 +62,9 @@ reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocki
 
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocking", "socks", "json", "rustls-tls", "rustls-tls-native-roots", "gzip"], default-features=false }
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 hbb_common = { path = "libs/hbb_common" }

@@ -19,8 +19,8 @@ fn main() -> ResultType<()> {
     );
     let matches = App::new("hbbr")
         .version(version::VERSION)
-        .author("Purslane Ltd. <info@rustdesk.com>")
-        .about("RustDesk Relay Server")
+        .author("CortenDesk — a fork of rustdesk-server <https://github.com/marcpope/cortendesk-server>")
+        .about("CortenDesk Server — relay server for RustDesk clients")
         .args_from_usage(&args)
         .get_matches();
     if let Ok(v) = ini::Ini::load_from_file(".env") {

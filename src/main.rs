@@ -24,7 +24,11 @@ fn main() -> ResultType<()> {
         , --mask=[MASK] 'Determine if the connection comes from LAN, e.g. 192.168.0.0/16'
         -k, --key=[KEY] 'Only allow the client with the same key'",
     );
-    init_args(&args, "hbbs", "RustDesk ID/Rendezvous Server");
+    init_args(
+        &args,
+        "hbbs",
+        "CortenDesk Server — ID/rendezvous server for RustDesk clients",
+    );
     let port = get_arg_or("port", RENDEZVOUS_PORT.to_string()).parse::<i32>()?;
     if port < 3 {
         bail!("Invalid port");

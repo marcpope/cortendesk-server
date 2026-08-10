@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "hbbs"
-version = "1.1.16"
+version = "1.0.0"
 dependencies = [
  "async-speed-limit",
  "async-trait",
@@ -1101,6 +1101,7 @@ dependencies = [
  "serde_json",
  "sodiumoxide",
  "sqlx",
+ "tempfile",
  "tokio-tungstenite",
  "tower-http",
  "tungstenite",

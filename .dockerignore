@@ -1,0 +1,9 @@
+# The image only needs the prebuilt binaries under bin/. Everything else —
+# especially target/, which is gigabytes — just slows the build context down.
+target/
+.git/
+libs/
+src/
+tests/
+kubernetes/
+*.md

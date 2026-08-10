@@ -1,0 +1,143 @@
+name: release
+
+# Binaries are cross-compiled on x86 runners and then copied into the image,
+# rather than compiled inside a multi-arch build. Building this tree under
+# arm64 emulation takes the better part of an hour; cross-compiling takes
+# minutes and produces the same static binaries.
+
+permissions:
+  contents: write
+  packages: write
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  GHCR_IMAGE: ghcr.io/marcpope/cortendesk-server
+  HUB_IMAGE: marcpope/cortendesk-server
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: test
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build
+        run: cross build --release --all-features --target ${{ matrix.target }}
+
+      - name: Collect binaries
+        run: |
+          mkdir -p bin/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/{hbbs,hbbr,cortendesk-utils} bin/${{ matrix.arch }}/
+          chmod +x bin/${{ matrix.arch }}/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: bin/${{ matrix.arch }}
+          if-no-files-found: error
+
+      - name: Attach binaries to the release
+        if: github.event_name == 'release'
+        run: |
+          tar -czf cortendesk-server-${{ github.event.release.tag_name }}-linux-${{ matrix.arch }}.tar.gz \
+            -C bin/${{ matrix.arch }} hbbs hbbr cortendesk-utils
+          gh release upload "${{ github.event.release.tag_name }}" \
+            cortendesk-server-${{ github.event.release.tag_name }}-linux-${{ matrix.arch }}.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    name: Image
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: bin
+      - name: Lay out the binaries
+        run: |
+          mv bin/bin-amd64 bin/amd64
+          mv bin/bin-arm64 bin/arm64
+          chmod +x bin/*/*
+          ls -l bin/*
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # latest and the bare major tag only move for a full release; a
+      # pre-release publishes its own version tag and nothing else, so anyone
+      # tracking :1 or :latest is never moved onto a beta by surprise.
+      - name: Work out the tags
+        id: tags
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          version="${version#v}"
+          if [ -z "$version" ]; then version="dev-${GITHUB_SHA::7}"; fi
+          tags="${GHCR_IMAGE}:${version},${HUB_IMAGE}:${version}"
+          if [ "${{ github.event.release.prerelease }}" = "false" ]; then
+            major="${version%%.*}"
+            minor="${version%.*}"
+            tags="${tags},${GHCR_IMAGE}:${major},${HUB_IMAGE}:${major}"
+            tags="${tags},${GHCR_IMAGE}:${minor},${HUB_IMAGE}:${minor}"
+            tags="${tags},${GHCR_IMAGE}:latest,${HUB_IMAGE}:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=CortenDesk Server
+            org.opencontainers.image.description=ID/rendezvous and relay servers for RustDesk clients, with encrypted signalling. A fork of rustdesk-server.
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.source=https://github.com/marcpope/cortendesk-server
