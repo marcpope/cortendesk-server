@@ -22,6 +22,7 @@ fn main() -> ResultType<()> {
         -r, --relay-servers=[HOST] 'Sets the default relay servers, separated by comma'
         -M, --rmem=[NUMBER(default={RMEM})] 'Sets UDP recv buffer size, set system rmem_max first, e.g., sudo sysctl -w net.core.rmem_max=52428800. vi /etc/sysctl.conf, net.core.rmem_max=52428800, sudo sysctl –p'
         , --mask=[MASK] 'Determine if the connection comes from LAN, e.g. 192.168.0.0/16'
+        , --trusted-proxies=[CIDRS] 'Comma-separated proxy CIDRs allowed to supply client IP headers (default loopback)'
         -k, --key=[KEY] 'Only allow the client with the same key'",
     );
     init_args(

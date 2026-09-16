@@ -66,6 +66,8 @@ fn spawn_hbbs(dir: &std::path::Path, port: i32) -> (Hbbs, sign::PublicKey, Strin
         // The startup self-test would keep a UDP conversation going with itself
         // for the life of the process; it proves nothing here.
         .env("TEST_HBBS", "no")
+        .env("RUST_LOG", "info")
+        .env("TOKIO_WORKER_THREADS", "2")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

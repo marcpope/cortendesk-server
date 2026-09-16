@@ -13,6 +13,27 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## Unreleased — 2026-09-16
+
+### Implement desktop-client WebSocket support
+
+* Added persistent TCP and WebSocket registration alongside existing UDP registration, with shared validation for IDs, UUIDs, keys, and rate limits. Persistence failures are propagated before identity state or stream ownership is committed.
+* Added persistent stream handling with bounded outbound queues, a single serialized writer per connection, and empty application-level heartbeats. Heartbeats use a 10-second interval, advertise a 20-second keepalive, and enforce a 30-second receive deadline.
+* Added transport-aware rendezvous request delivery, reusable connection routing, WebSocket relay selection when either peer uses WebSocket, and online-state queries that account for active stream registrations.
+* Added connection-owned replacement and cleanup while retaining separately tracked UDP presence.
+* Added configurable trusted-proxy CIDRs for `hbbs` and `hbbr`, defaulting to loopback only. Forwarded client addresses are retained without collapsing multiple connections into a shared `IP:0` identity.
+* Added integration coverage for registration, encryption, heartbeats, clients sharing an IP address, repeated sessions, reconnects, persistence failures, and relay framing across native/native, WebSocket/WebSocket, and both mixed transport directions.
+* Existing integration-test processes now use explicit logging and worker settings, while database tests use an isolated scratch database.
+
+This implementation draws on work from the following third-party projects, with special thanks to:
+
+* SctgDesk: https://github.com/sctg-development/sctgdesk-server (`9990d752`)
+* Lejianwen RustDesk Server: https://github.com/lejianwen/rustdesk-server (`fb8b5b9c`)
+* BetterDesk: https://github.com/UNITRONIX/BetterDesk/tree/dev (`14d93741`)
+
+The implementation retains this fork’s existing RustDesk protocol and encryption dependencies. It requires no protocol renumbering or database migration.
+
+
 ## 1.0.0 — 2026-08-10
 
 ### Encrypted signalling in `hbbs` (`src/rendezvous_server.rs`)

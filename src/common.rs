@@ -1,6 +1,8 @@
 use clap::App;
 use hbb_common::{
-    allow_err, anyhow::{Context, Result}, get_version_number, log, tokio, ResultType
+    allow_err,
+    anyhow::{Context, Result},
+    get_version_number, log, tokio, ResultType,
 };
 use ini::Ini;
 use sodiumoxide::crypto::sign;
@@ -189,9 +191,63 @@ pub async fn listen_signal() -> Result<()> {
     unreachable!();
 }
 
-
 // Upstream polled RustDesk's release feed here once a day and logged when a
 // newer rustdesk-server existed. Removed with the fork: it compared their
 // version numbers against ours, so a current build reported itself as out of
 // date, and it made a daily request to a third party that a self-hosted
 // server has no reason to make.
+/// Reverse-proxy headers are identity hints only when the transport peer is
+/// explicitly trusted. Loopback is the default for the bundled Nginx.
+pub(crate) fn trusted_proxy(ip: std::net::IpAddr) -> ResultType<bool> {
+    let ip = match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(ip)),
+        ip => ip,
+    };
+    let configured = std::env::var("TRUSTED-PROXIES")
+        .or_else(|_| std::env::var("TRUSTED_PROXIES"))
+        .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_owned());
+    let mut trusted = false;
+    for item in configured
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let network: ipnetwork::IpNetwork = item.parse().map_err(|err| {
+            hbb_common::anyhow::anyhow!("invalid trusted proxy {}: {}", item, err)
+        })?;
+        trusted |= network.contains(ip);
+    }
+    Ok(trusted)
+}
+
+pub(crate) fn forwarded_ip(headers: &http::HeaderMap) -> Option<std::net::IpAddr> {
+    let value = headers
+        .get("X-Real-IP")
+        .or_else(|| headers.get("X-Forwarded-For"))?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()?
+        .trim();
+    let ip = value
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .or_else(|| value.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+        .or_else(|| {
+            value
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse()
+                .ok()
+        })?;
+    Some(match ip {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(ip)),
+        ip => ip,
+    })
+}
