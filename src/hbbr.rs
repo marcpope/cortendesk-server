@@ -14,6 +14,7 @@ fn main() -> ResultType<()> {
         .start()?;
     let args = format!(
         "-p, --port=[NUMBER(default={RELAY_PORT})] 'Sets the listening port'
+        , --trusted-proxies=[CIDRS] 'Comma-separated proxy CIDRs allowed to supply client IP headers (default loopback)'
         -k, --key=[KEY] 'Only allow the client with the same key'
         ",
     );
@@ -28,6 +29,10 @@ fn main() -> ResultType<()> {
             section.iter().for_each(|(k, v)| std::env::set_var(k, v));
         }
     }
+    if let Some(proxies) = matches.value_of("trusted-proxies") {
+        std::env::set_var("TRUSTED-PROXIES", proxies);
+    }
+    common::trusted_proxy(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))?;
     let mut port = RELAY_PORT;
     if let Ok(v) = std::env::var("PORT") {
         let v: i32 = v.parse().unwrap_or_default();

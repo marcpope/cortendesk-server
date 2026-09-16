@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::database;
+use crate::stream_connection::Registration;
 use hbb_common::{
     bytes::Bytes,
     log,
@@ -30,6 +31,7 @@ pub(crate) struct PeerInfo {
 }
 
 pub(crate) struct Peer {
+    pub(crate) stream: Option<Registration>,
     pub(crate) socket_addr: SocketAddr,
     pub(crate) last_reg_time: Instant,
     pub(crate) guid: Vec<u8>,
@@ -44,6 +46,7 @@ pub(crate) struct Peer {
 impl Default for Peer {
     fn default() -> Self {
         Self {
+            stream: None,
             socket_addr: "0.0.0.0:0".parse().unwrap(),
             last_reg_time: get_expired_time(),
             guid: Vec::new(),
@@ -54,6 +57,18 @@ impl Default for Peer {
             // disabled: false,
             reg_pk: (0, get_expired_time()),
         }
+    }
+}
+
+impl Peer {
+    pub(crate) fn endpoint(&self) -> Option<(SocketAddr, bool)> {
+        if let Some(stream) = self.stream.as_ref().filter(|s| s.alive()) {
+            return Some((stream.connection.addr, stream.connection.ws));
+        }
+        if self.socket_addr.port() != 0 && self.last_reg_time.elapsed().as_secs() < 30 {
+            return Some((self.socket_addr, false));
+        }
+        None
     }
 }
 
@@ -99,27 +114,21 @@ impl PeerMap {
         pk: Bytes,
         ip: String,
     ) -> register_pk_response::Result {
-        log::info!("update_pk {} {:?} {:?} {:?}", id, addr, uuid, pk);
-        let (info_str, guid) = {
-            let mut w = peer.write().await;
-            w.socket_addr = addr;
-            w.uuid = uuid.clone();
-            w.pk = pk.clone();
-            w.last_reg_time = Instant::now();
-            w.info.ip = ip;
-            (
-                serde_json::to_string(&w.info).unwrap_or_default(),
-                w.guid.clone(),
-            )
+        log::info!("update_pk {} {:?}", id, addr);
+        // Commit identity to memory only after persistence succeeds. Presence is
+        // maintained by the caller separately for UDP and registered streams.
+        let guid = peer.read().await.guid.clone();
+        let info = PeerInfo { ip };
+        let info_str = match serde_json::to_string(&info) {
+            Ok(value) => value,
+            Err(_) => return register_pk_response::Result::SERVER_ERROR,
         };
-        if guid.is_empty() {
+        let guid = if guid.is_empty() {
             match self.db.insert_peer(&id, &uuid, &pk, &info_str).await {
+                Ok(guid) => guid,
                 Err(err) => {
                     log::error!("db.insert_peer failed: {}", err);
                     return register_pk_response::Result::SERVER_ERROR;
-                }
-                Ok(guid) => {
-                    peer.write().await.guid = guid;
                 }
             }
         } else {
@@ -127,8 +136,13 @@ impl PeerMap {
                 log::error!("db.update_pk failed: {}", err);
                 return register_pk_response::Result::SERVER_ERROR;
             }
-            log::info!("pk updated instead of insert");
-        }
+            guid
+        };
+        let mut peer = peer.write().await;
+        peer.guid = guid;
+        peer.uuid = uuid;
+        peer.pk = pk;
+        peer.info = info;
         register_pk_response::Result::OK
     }
 
@@ -148,7 +162,15 @@ impl PeerMap {
                 ..Default::default()
             };
             let peer = Arc::new(RwLock::new(peer));
-            self.map.write().await.insert(id.to_owned(), peer.clone());
+            // Another task may have loaded/registered this ID while the DB
+            // read was in flight. Never replace its live connection ownership.
+            let peer = self
+                .map
+                .write()
+                .await
+                .entry(id.to_owned())
+                .or_insert(peer)
+                .clone();
             return Some(peer);
         }
         None

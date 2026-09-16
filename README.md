@@ -3,12 +3,11 @@
 ID/rendezvous (`hbbs`) and relay (`hbbr`) servers for RustDesk clients.
 
 This is a fork of [rustdesk-server](https://github.com/rustdesk/rustdesk-server),
-based on release 1.1.16, with one change that matters: **signed-in clients can
-connect.**
+based on release 1.1.16. It adds encrypted signalling for signed-in clients
+and persistent desktop registration over TCP and WebSocket.
 
-It is a drop-in replacement. Same binaries, same ports, same command-line flags,
-same data files — point your existing compose file at these images and nothing
-else changes.
+It uses the same binaries, ports, and data-file formats. Reverse proxies on
+non-loopback addresses must be configured as trusted proxies (see below).
 
 ## Why this fork exists
 
@@ -42,9 +41,12 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
   encrypts the rest of the connection once it has. Requires a server key pair,
   which is the default (`-k _`, or the generated `id_ed25519`); with no key
   there is nothing to sign the offer with, so nothing is offered.
-- `hbbr` is untouched. Clients never run this exchange against the relay.
-- WebSocket connections are untouched. Clients skip the exchange there because
-  the transport handles encryption, so offering it would only confuse them.
+- `hbbs` accepts desktop `RegisterPk` over TCP and WebSocket, maintains
+  registration with application heartbeats, and routes incoming requests over
+  the registered connection. WebSocket sessions use relay transport.
+- WebSocket signalling skips the native key exchange; use WSS at your TLS
+  reverse proxy. Clients never run this exchange against `hbbr`.
+- Both listeners honour forwarded client-IP headers only from trusted proxies.
 - Packaging trimmed to what is published here: Docker images and static Linux
   binaries. Upstream's Debian packaging, Windows installer UI, s6 image and
   Kubernetes example are not carried.
@@ -84,6 +86,71 @@ no reconfiguration.
 Going back is the same move in reverse — nothing in the data directory changes
 format. Signed-in clients simply stop connecting again.
 
+## Desktop WebSocket mode (unreleased)
+
+These changes are available in this source tree; build it to test them before
+using a published image. In RustDesk desktop, enable **Settings → Network →
+Use WebSocket** (`allow-websocket=Y`). Configure the ID/relay server hostname,
+server public key, and HTTPS API-server URL as usual. RustDesk 1.4.9 uses that
+HTTPS setting when constructing `wss://HOST/ws/id` and `wss://HOST/ws/relay`.
+
+Proxy routes:
+
+| Path | Upstream | Role |
+| --- | --- | --- |
+| `/ws/id` | `hbbs:21118` | Registration and signalling |
+| `/ws/relay` | `hbbr:21119` | Relayed session data |
+
+Forward HTTP/1.1 WebSocket Upgrade and Connection headers. Use a proxy idle
+read timeout of at least 120 seconds. If HAProxy terminates TLS in front of
+Nginx, preserve the trusted client-IP chain through both hops. Nginx must set
+`X-Real-IP` or `X-Forwarded-For` to a verified client address rather than blindly
+passing client-supplied values.
+
+### Trusted proxies
+
+Both `hbbs` and `hbbr` trust loopback (`127.0.0.0/8,::1/128`) by default. If Nginx
+connects from a container-network address, add its actual source IP/CIDR:
+
+```bash
+hbbs --trusted-proxies '127.0.0.0/8,::1/128,172.20.0.5/32' -r relay.example.com:21117
+hbbr --trusted-proxies '127.0.0.0/8,::1/128,172.20.0.5/32'
+```
+
+`TRUSTED_PROXIES` is the environment equivalent; the command-line setting takes
+precedence. An empty setting trusts no proxies. Invalid CIDRs fail startup.
+Untrusted or invalid forwarded headers leave the socket's real peer IP in use.
+Forwarded IPs are used for identity checks and logging; connection routing uses
+a separate internal ID and a reserved nonzero address correlation token.
+
+### Registration lifecycle
+
+- Successful stream registration returns `OK` with `keep_alive=20` seconds.
+- The server sends empty application heartbeat messages every 10 seconds;
+  clients echo them. A 30-second receive deadline expires silent connections.
+- Heartbeats start only after successful registration, so temporary signalling
+  connections receive their protocol response first.
+- The newest successfully validated stream owns the device registration.
+  Old heartbeats and disconnects cannot change its replacement's presence.
+- Native UDP presence is tracked separately. A live stream takes routing
+  priority; a live UDP registration can remain available after it disconnects.
+- Outbound queues hold at most 64 messages. A full queue or a write taking more
+  than five seconds terminates that stream; WS closure gets a bounded handshake.
+- UUID/key validation and rate limits are shared across transports. A database
+  write failure returns `SERVER_ERROR` without claiming the new identity.
+
+The database schema and protobuf enum numbers are unchanged. This feature does
+not add an API enrollment/sign-in requirement to the existing registration rules.
+
+### Verification
+
+`tests/stream_registration.rs` starts isolated `hbbs`/`hbbr` processes and checks
+registration, repeated routing, shared IPv4/IPv6 addresses, reconnection,
+heartbeat expiry, persistence failure, encrypted TCP, and all native/WS relay
+combinations. Tests require permission to bind local sockets and a non-loopback
+local interface for native relay connections (the relay reserves loopback TCP
+for management commands). The idle test takes approximately 40 seconds.
+
 ## Building
 
 ```bash
@@ -95,7 +162,7 @@ cargo build --release
 `hbbs`, `hbbr` and `cortendesk-utils` land in `target/release`.
 
 ```bash
-cargo test          # includes an end-to-end test of the handshake
+cargo test --locked # includes real-socket signalling and relay tests
 ```
 
 ## Licence
