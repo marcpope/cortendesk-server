@@ -13,6 +13,54 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## 1.1.0 (2026-09-29)
+
+### Device access policy from a CortenDesk console (`src/policy.rs`, `src/rendezvous_server.rs`)
+
+New. `hbbs` can take its access policy from a CortenDesk console, so a server
+can refuse devices the console has not approved and devices marked
+incoming-only. Off unless `CORTENDESK_CONSOLE_URL` and
+`CORTENDESK_SERVER_SECRET` are both set; without them `hbbs` behaves exactly
+as 1.0.0.
+
+- Every `CORTENDESK_POLICY_INTERVAL` seconds (default 5) `hbbs` fetches
+  `GET <console>/api/server/policy` with the secret as a bearer token: the mode,
+  the approved devices, the incoming-only devices, and SHA-256 hashes of console
+  access tokens with the device each was issued to. Unchanged policy answers
+  304. Checks run against the copy in memory; no request waits on HTTP.
+- The last good policy is kept when the console is unreachable, and saved to
+  `policy_snapshot.json` in the working directory so a restart applies it
+  before the console answers. With no policy at all (first start, console
+  down) every device is allowed and the log says so.
+- A punch hole request or relay request whose sender may not start sessions
+  is refused with a message the client shows (`other_failure` /
+  `refuse_reason`). In approved-only mode a request for a device that is not
+  approved is refused the same way. Registration is unaffected, so unapproved
+  devices still come online and reach the console.
+- The request does not name its sender. `hbbs` identifies it by, in order: a
+  ticket signed with the shared secret (the console's own web client), the
+  console access token signed-in clients send, or the TCP peer address matched
+  against devices registered from that address in the last 30 seconds, not
+  counting the target. Forwarded-for headers are not trusted for this. In
+  approved-only mode the address match is used only when the console's policy
+  sets `ip_match`.
+- When a device answers a local address request, `hbbs` records its LAN
+  address and posts it to `<console>/api/server/local-addrs`, batched, once per
+  address per device every 10 minutes at most, and only when the answer comes
+  from the address that device registered from.
+- New admin command `policy` (`pol`) on the loopback admin port prints the
+  current policy state.
+- `hbbr` is unchanged.
+
+Added `tests/access_policy.rs` (end-to-end against a real `hbbs` process and a
+fake console) and unit tests in `src/policy.rs`.
+
+### Version
+
+Package version `1.1.0`.
+
+---
+
 ## 1.0.0 — 2026-08-10
 
 ### Encrypted signalling in `hbbs` (`src/rendezvous_server.rs`)

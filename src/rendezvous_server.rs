@@ -1,11 +1,14 @@
 // Modified by the CortenDesk Server project on 2026-08-10: added the server
 // half of the signalling key exchange (`key_exchange_offer` /
-// `key_exchange_accept`, and the cipher carried on `TcpSink`). See CHANGES.md.
+// `key_exchange_accept`, and the cipher carried on `TcpSink`). Modified on
+// 2026-09-29: device access policy checks on punch hole and relay requests,
+// and LAN address reports (`crate::policy`). See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
 use crate::common::*;
 use crate::peer::*;
+use crate::policy;
 use hbb_common::{
     allow_err, anyhow::anyhow, bail,
     bytes::{Bytes, BytesMut},
@@ -162,6 +165,7 @@ impl RendezvousServer {
         log::info!("mask: {:?}", rs.inner.mask);
         log::info!("local-ip: {:?}", rs.inner.local_ip);
         std::env::set_var("PORT_FOR_API", port.to_string());
+        policy::start();
         rs.parse_relay_servers(&get_arg("relay-servers"));
         let mut listener = create_tcp_listener(port).await?;
         let mut listener2 = create_tcp_listener(nat_port).await?;
@@ -430,6 +434,7 @@ impl RendezvousServer {
                             );
                         }
                     }
+                    policy::note_registration(&id, addr.ip());
                     if changed {
                         self.pm.update_pk(id, peer, addr, rk.uuid, rk.pk, ip).await;
                     }
@@ -493,6 +498,7 @@ impl RendezvousServer {
         bytes: &[u8],
         sink: &mut Option<Sink>,
         addr: SocketAddr,
+        peer_ip: IpAddr,
         key: &str,
         ws: bool,
     ) -> bool {
@@ -503,13 +509,33 @@ impl RendezvousServer {
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
                     }
-                    allow_err!(self.handle_tcp_punch_hole_request(addr, ph, key, ws).await);
+                    allow_err!(
+                        self.handle_tcp_punch_hole_request(addr, peer_ip, ph, key, ws)
+                            .await
+                    );
                     return true;
                 }
                 Some(rendezvous_message::Union::RequestRelay(mut rf)) => {
                     // there maybe several attempt, so sink can be none
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
+                    }
+                    if let Err(reason) = policy::check_initiator(&rf.token, peer_ip, &rf.id)
+                        .and_then(|_| policy::check_target(&rf.id))
+                    {
+                        log::info!(
+                            "Policy: refused relay from {} to {}: {}",
+                            peer_ip,
+                            rf.id,
+                            reason
+                        );
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_relay_response(RelayResponse {
+                            refuse_reason: reason.to_owned(),
+                            ..Default::default()
+                        });
+                        allow_err!(self.send_to_tcp_sync(msg_out, addr).await);
+                        return true;
                     }
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
@@ -595,6 +621,7 @@ impl RendezvousServer {
             if !request_pk {
                 old.socket_addr = socket_addr;
                 old.last_reg_time = Instant::now();
+                policy::note_registration(&id, ip);
             }
             let ip_change = if ip_change && old.reg_pk.0 <= 2 {
                 Some(if old.socket_addr.port() == 0 {
@@ -662,6 +689,7 @@ impl RendezvousServer {
         socket: Option<&'a mut FramedSocket>,
     ) -> ResultType<()> {
         // relay local addrs of B to A
+        policy::note_local_addr(&la.id, AddrMangle::decode(&la.local_addr), addr.ip());
         let addr_a = AddrMangle::decode(&la.socket_addr);
         log::debug!(
             "{} local addrs response to {:?} from {:?}",
@@ -690,6 +718,7 @@ impl RendezvousServer {
     async fn handle_punch_hole_request(
         &mut self,
         addr: SocketAddr,
+        peer_ip: IpAddr,
         ph: PunchHoleRequest,
         key: &str,
         ws: bool,
@@ -704,6 +733,12 @@ impl RendezvousServer {
             });
             return Ok((msg_out, None));
         }
+        if let Err(reason) = policy::check_initiator(&ph.token, peer_ip, &ph.id) {
+            log::info!("Policy: refused punch from {} to {}: {}", peer_ip, ph.id, reason);
+            let refusal =
+                Self::punch_refusal(punch_hole_response::Failure::LICENSE_MISMATCH, reason);
+            return Ok((refusal, None));
+        }
         let id = ph.id;
         // punch hole request from A, relay to B,
         // check if in same intranet first,
@@ -715,6 +750,12 @@ impl RendezvousServer {
                 let r = peer.read().await;
                 (r.last_reg_time.elapsed().as_millis() as i64, r.socket_addr)
             };
+            if let Err(reason) = policy::check_target(&id) {
+                log::info!("Policy: refused punch from {} to {}: {}", peer_ip, id, reason);
+                let refusal =
+                    Self::punch_refusal(punch_hole_response::Failure::ID_NOT_EXIST, reason);
+                return Ok((refusal, None));
+            }
             if elapsed >= REG_TIMEOUT {
                 let mut msg_out = RendezvousMessage::new();
                 msg_out.set_punch_hole_response(PunchHoleResponse {
@@ -797,6 +838,21 @@ impl RendezvousServer {
         }
     }
 
+    /// A punch hole refusal the client shows as text. `other_failure` is what
+    /// clients display (since 1.1.8); `failure` is for anything older.
+    fn punch_refusal(
+        failure: punch_hole_response::Failure,
+        reason: &str,
+    ) -> RendezvousMessage {
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_punch_hole_response(PunchHoleResponse {
+            failure: failure.into(),
+            other_failure: reason.to_owned(),
+            ..Default::default()
+        });
+        msg_out
+    }
+
     #[inline]
     async fn handle_online_request(
         &mut self,
@@ -869,11 +925,14 @@ impl RendezvousServer {
     async fn handle_tcp_punch_hole_request(
         &mut self,
         addr: SocketAddr,
+        peer_ip: IpAddr,
         ph: PunchHoleRequest,
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
-        let (msg, to_addr) = self.handle_punch_hole_request(addr, ph, key, ws).await?;
+        let (msg, to_addr) = self
+            .handle_punch_hole_request(addr, peer_ip, ph, key, ws)
+            .await?;
         if let Some(addr) = to_addr {
             self.tx.send(Data::Msg(msg.into(), addr))?;
         } else {
@@ -889,7 +948,9 @@ impl RendezvousServer {
         ph: PunchHoleRequest,
         key: &str,
     ) -> ResultType<()> {
-        let (msg, to_addr) = self.handle_punch_hole_request(addr, ph, key, false).await?;
+        let (msg, to_addr) = self
+            .handle_punch_hole_request(addr, addr.ip(), ph, key, false)
+            .await?;
         self.tx.send(Data::Msg(
             msg.into(),
             match to_addr {
@@ -954,14 +1015,15 @@ impl RendezvousServer {
         match fds.next() {
             Some("h") => {
                 res = format!(
-                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
                     "relay-servers(rs) <separated by ,>",
                     "reload-geo(rg)",
                     "ip-blocker(ib) [<ip>|<number>] [-]",
                     "ip-changes(ic) [<id>|<number>] [-]",
                     "punch-requests(pr) [<number>] [-]",
                     "always-use-relay(aur)",
-                    "test-geo(tg) <ip1> <ip2>"
+                    "test-geo(tg) <ip1> <ip2>",
+                    "policy(pol)"
                 )
             }
             Some("relay-servers" | "rs") => {
@@ -1093,6 +1155,9 @@ impl RendezvousServer {
                     );
                 }
             }
+            Some("policy" | "pol") => {
+                res = policy::describe();
+            }
             Some("test-geo" | "tg") => {
                 if let Some(rs) = fds.next() {
                     if let Ok(a) = rs.parse::<IpAddr>() {
@@ -1168,6 +1233,9 @@ impl RendezvousServer {
         key: &str,
         ws: bool,
     ) -> ResultType<()> {
+        // Policy identifies the sender by the TCP peer, not by the forwarded
+        // headers below: anyone can set those on a direct connection.
+        let peer_ip = addr.ip();
         let mut sink;
         if ws {
             use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -1191,7 +1259,7 @@ impl RendezvousServer {
             sink = Some(Sink::Ws(a));
             while let Ok(Some(Ok(msg))) = timeout(30_000, b.next()).await {
                 if let tungstenite::Message::Binary(bytes) = msg {
-                    if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+                    if !self.handle_tcp(&bytes, &mut sink, addr, peer_ip, key, ws).await {
                         break;
                     }
                 }
@@ -1236,7 +1304,7 @@ impl RendezvousServer {
                         None => exchange_sk = None,
                     }
                 }
-                if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
+                if !self.handle_tcp(&bytes, &mut sink, addr, peer_ip, key, ws).await {
                     break;
                 }
             }

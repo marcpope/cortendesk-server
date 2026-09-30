@@ -45,6 +45,9 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
 - `hbbr` is untouched. Clients never run this exchange against the relay.
 - WebSocket connections are untouched. Clients skip the exchange there because
   the transport handles encryption, so offering it would only confuse them.
+- Optional device policy from a CortenDesk console: refuse devices the
+  console has not approved, and devices marked incoming-only. Off unless
+  configured; see below.
 - Packaging trimmed to what is published here: Docker images and static Linux
   binaries. Upstream's Debian packaging, Windows installer UI, s6 image and
   Kubernetes example are not carried.
@@ -84,6 +87,70 @@ no reconfiguration.
 Going back is the same move in reverse — nothing in the data directory changes
 format. Signed-in clients simply stop connecting again.
 
+## Device policy from a CortenDesk console
+
+Since 1.1.0 `hbbs` can enforce the device policy set in a
+[CortenDesk](https://github.com/marcpope/cortendesk) console. The CortenDesk
+image runs this server inside it and wires this up on its own. For a separate
+`hbbs`, set on the `hbbs` container:
+
+| Variable | Meaning |
+|---|---|
+| `CORTENDESK_CONSOLE_URL` | Base URL of the console as `hbbs` reaches it, e.g. `https://desk.example.com` |
+| `CORTENDESK_SERVER_SECRET` | Shared secret. Same value as `CORTENDESK_SERVER_SECRET` on the console |
+| `CORTENDESK_POLICY_INTERVAL` | Seconds between policy fetches. Default `5`, range 1 to 300 |
+
+Both of the first two must be set, or the link stays off and `hbbs` behaves as
+1.0.0. `hbbr` needs nothing.
+
+What it does:
+
+- Pulls the policy from `GET /api/server/policy` every interval and enforces
+  it from memory. Unchanged policy is a 304.
+- In approved-only mode, a device the console has not approved cannot start a
+  session and cannot be reached. It still registers, so it shows up in the
+  console as pending.
+- A device marked incoming-only can be reached but cannot start a session, in
+  either mode.
+- Refused clients see why: "This device is not approved on this server...",
+  "This device is set to incoming only...", or "The remote device is not
+  approved on this server."
+- Posts the LAN address a device reports during connection setup to
+  `POST /api/server/local-addrs`, so the console can show it.
+
+The console is the source of truth. If it is unreachable, `hbbs` keeps the
+last policy it got, and keeps it across restarts in `policy_snapshot.json`.
+With no policy at all, on a first start with the console down, every device is
+allowed and the log says so. This is deliberate: failing closed would stop
+every session on the server whenever the console is down.
+
+### How `hbbs` knows who is asking
+
+A connection request names the device to reach, not the device asking. `hbbs`
+identifies the sender by, in order:
+
+1. a ticket signed with the shared secret, which the console's web client sends;
+2. the console access token a signed-in RustDesk client sends;
+3. its IP address, matched against devices that registered from that address
+   in the last 30 seconds, not counting the target.
+
+Signed-in clients are identified exactly. The IP match is weak: behind a
+shared NAT, or a proxy that rewrites source addresses (Docker's userland
+proxy, IPv6 port publishing, Docker Desktop), every client looks like every
+other one behind it. So in approved-only mode it is off unless the console
+turns it on ("Identify signed-out devices by IP address"), and only signed-in
+clients and the web client can start sessions. Open mode still uses it to stop
+incoming-only devices, which is best effort for signed-out clients.
+
+### Limits
+
+- Sessions already running are not cut. A device that loses approval cannot
+  start or receive new ones after the next fetch.
+- `hbbr` does not see the policy. It pairs two connections that present the
+  same uuid and the server key. Stock clients only learn that uuid through
+  `hbbs`, so the policy covers them; modified clients that agree on a uuid some
+  other way can still use the relay.
+
 ## Building
 
 ```bash
@@ -95,7 +162,7 @@ cargo build --release
 `hbbs`, `hbbr` and `cortendesk-utils` land in `target/release`.
 
 ```bash
-cargo test          # includes an end-to-end test of the handshake
+cargo test          # end-to-end tests of the handshake and the device policy
 ```
 
 ## Licence
