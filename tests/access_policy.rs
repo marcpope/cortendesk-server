@@ -611,7 +611,7 @@ async fn lan_address_over_websocket_ignores_forwarded_headers() {
         .into_client_request()
         .unwrap();
     req.headers_mut()
-        .insert("X-Real-IP", HeaderValue::from_static("203.0.113.9"));
+        .insert("X-Real-IP", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("203.0.113.9"));
     let (mut ws, _) = connect_async(req).await.expect("websocket connects");
     let mut msg = RendezvousMessage::new();
     msg.set_local_addr(LocalAddr {
@@ -621,7 +621,7 @@ async fn lan_address_over_websocket_ignores_forwarded_headers() {
         version: "1.4.3".to_owned(),
         ..Default::default()
     });
-    ws.send(Message::Binary(msg.write_to_bytes().unwrap()))
+    ws.send(Message::Binary(msg.write_to_bytes().unwrap().into()))
         .await
         .expect("answer sent");
 

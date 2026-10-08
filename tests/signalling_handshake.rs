@@ -246,7 +246,7 @@ async fn websocket_clients_are_not_offered_an_exchange() {
 
     // And normal signalling still works on that transport.
     let request = punch_hole_request("", &server_key);
-    sink.send(Message::Binary(request.write_to_bytes().unwrap()))
+    sink.send(Message::Binary(request.write_to_bytes().unwrap().into()))
         .await
         .expect("request sent");
     match stream.next().await.expect("a reply").expect("reply read") {

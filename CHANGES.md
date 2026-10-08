@@ -68,6 +68,21 @@ contributor instruction files `AGENTS.md` and its alias.
   The new `hbb_common` links native-tls, which is OpenSSL on Linux, for both
   the binaries and the build script, and the static musl builds have no
   system OpenSSL to link against.
+
+### Dependency security updates
+
+- `tungstenite` and `tokio-tungstenite` 0.17 to 0.26 (RUSTSEC-2023-0065: a
+  crafted WebSocket handshake could make the server spend unbounded CPU, with
+  no authentication, on the WebSocket ports). Two call sites in
+  `src/relay_server.rs` and `src/rendezvous_server.rs` adapted to the newer
+  message type. New test `tests/relay_websocket.rs` runs a real `hbbr` and
+  checks WebSocket-to-WebSocket and WebSocket-to-TCP relaying, and that the
+  relay key is enforced on WebSocket.
+- `cargo update` within the existing version requirements, which retires the
+  advisories for `bytes`, `h2`, `axum-core`, `crossbeam-epoch`, `openssl`,
+  `rustls`, `rustls-webpki`, `webpki` and `remove_dir_all`.
+- Security scanning in CI: `cargo audit` (accepted advisories listed with
+  reasons in `.cargo/audit.toml`), gitleaks, and CodeQL for Rust.
 - README: a short Configuration section pointing at that document.
 - `docs/environment-variables.md`: a note that the WebSocket ports trust
   `X-Real-IP` / `X-Forwarded-For` and belong behind a reverse proxy.
