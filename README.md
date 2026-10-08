@@ -3,8 +3,8 @@
 ID/rendezvous (`hbbs`) and relay (`hbbr`) servers for RustDesk clients.
 
 This is a fork of [rustdesk-server](https://github.com/rustdesk/rustdesk-server),
-based on release 1.1.16, with one change that matters: **signed-in clients can
-connect.**
+in sync with upstream release 1.1.17, with one change that matters:
+**signed-in clients can connect.**
 
 It is a drop-in replacement. Same binaries, same ports, same command-line flags,
 same data files — point your existing compose file at these images and nothing
@@ -86,6 +86,14 @@ no reconfiguration.
 
 Going back is the same move in reverse — nothing in the data directory changes
 format. Signed-in clients simply stop connecting again.
+
+## Configuration
+
+Flags, environment variables and `.env` / `--config` files work as they do
+upstream; `hbbs --help` and `hbbr --help` list the flags. Since 1.1.1 both
+servers take `-b` / `BIND` to listen on one local IPv4 or IPv6 address instead
+of all interfaces. Every option is in
+[docs/environment-variables.md](docs/environment-variables.md).
 
 ## Device policy from a CortenDesk console
 

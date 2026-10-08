@@ -1,6 +1,6 @@
 [package]
 name = "hbbs"
-version = "1.1.0"
+version = "1.1.1"
 authors = ["CortenDesk"]
 license = "AGPL-3.0-only"
 description = "ID/rendezvous and relay servers for RustDesk clients, with encrypted signalling. A fork of rustdesk-server."
@@ -63,11 +63,20 @@ reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocki
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
 reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocking", "socks", "json", "rustls-tls", "rustls-tls-native-roots", "gzip"], default-features=false }
 
+# hbb_common pulls in native-tls (OpenSSL) on Linux. Build OpenSSL from source
+# so the static musl binaries need no system OpenSSL, on the target or on the
+# host that runs build.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 tempfile = "3"
 
 [build-dependencies]
 hbb_common = { path = "libs/hbb_common" }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [workspace]
 members = ["libs/hbb_common"]

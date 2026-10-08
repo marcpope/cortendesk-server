@@ -15,8 +15,9 @@ source for this program — including these modifications — is published at:
 
     https://github.com/marcpope/cortendesk-server
 
-Files this project added outright, such as src/policy.rs and the tests under
-tests/, are licensed under the AGPL-3.0 as well.
+Files this project added outright, such as src/policy.rs,
+tests/access_policy.rs and tests/signalling_handshake.rs, are licensed under the
+AGPL-3.0 as well.
 
 libs/hbb_common is a git submodule of https://github.com/rustdesk/hbb_common and
 is used unmodified.

@@ -1,8 +1,9 @@
 # Configuration & Environment Variables
 
-This document is the single reference for every option that the open‑source
-RustDesk server binaries (`hbbs`, `hbbr`) understand: command‑line flags,
-environment variables, and configuration files.
+This document is the single reference for every option that the CortenDesk
+Server binaries (`hbbs`, `hbbr`) understand: command‑line flags, environment
+variables, and configuration files. They are the same options upstream
+rustdesk-server takes, plus the device policy variables listed under `hbbs`.
 
 > **TL;DR** — For most people the command‑line flags shown by `hbbs --help` /
 > `hbbr --help` are all you need. Environment variables are an alternative way to
@@ -39,7 +40,7 @@ in the inherited process environment.
 | Variable | CLI flag | Default | Description |
 |---|---|---|---|
 | `KEY` | `-k`, `--key` | `-` | Public key clients must use, a base64 secret key, or `-` / `_` to load or generate a key pair (`id_ed25519`, `id_ed25519.pub`). `-` and `_` have the same behavior, so explicitly passing `-k _` to `hbbs` is unnecessary. An explicitly empty value disables key validation; see [Keys](#keys-and-encryption). |
-| `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.17.** Local IPv4 or IPv6 address on which all `hbbs` TCP, UDP, and WebSocket listeners bind. This does not change the addresses advertised to clients. Supported by `--config`, `.env`, and the inherited environment. |
+| `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.1.** Local IPv4 or IPv6 address on which all `hbbs` TCP, UDP, and WebSocket listeners bind. This does not change the addresses advertised to clients. Supported by `--config`, `.env`, and the inherited environment. |
 | `PORT` | `-p`, `--port` | `21116` | Main TCP/UDP listening port. `hbbs` also binds `PORT-1` (NAT type test) and `PORT+2` (WebSocket). |
 | `RELAY-SERVERS` | `-r`, `--relay-servers` | *(empty)* | Optional relay server override handed to clients, as comma-separated `host` or `host:port` values. Leave empty when `hbbr` uses the same address as `hbbs` and the standard port `21117`; clients derive it automatically. Set this only when the relay uses a different IP/hostname or a non-standard port. |
 | `RMEM` | `-M`, `--rmem` | `0` (system default) | UDP receive‑buffer size in bytes. Raise the OS limit first: `sudo sysctl -w net.core.rmem_max=52428800`. |
@@ -48,11 +49,13 @@ in the inherited process environment.
 | `ALWAYS_USE_RELAY` 🅴 | *(none)* | `N` | `Y` forces every session through a relay (disables direct/hole‑punched connections). At runtime, send `always-use-relay Y` or `always-use-relay N` to the `hbbs` [loopback console](#runtime-console). |
 | `DB_URL` 🅴 | *(none)* | `./db_v2.sqlite3` | Path/URL of the SQLite database file. See [Database](#database). |
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
+| `CORTENDESK_CONSOLE_URL` | *(none)* | *(empty)* | Base URL of a CortenDesk console, for device policy. See the [README](../README.md#device-policy-from-a-cortendesk-console). |
+| `CORTENDESK_SERVER_SECRET` | *(none)* | *(empty)* | Secret shared with that console. Policy stays off unless this and `CORTENDESK_CONSOLE_URL` are both set. |
+| `CORTENDESK_POLICY_INTERVAL` | *(none)* | `5` | Seconds between policy fetches, 1 to 300. |
 
 🅴 = set through the inherited process environment.
 
-> `PORT_FOR_API` / `KEY_FOR_API` are only used by RustDesk Server **Pro** and its
-> API; they have no effect in the open‑source server.
+> `PORT_FOR_API` / `KEY_FOR_API` have no effect on this server.
 
 ---
 
@@ -61,7 +64,7 @@ in the inherited process environment.
 | Variable | CLI flag | Default | Description |
 |---|---|---|---|
 | `KEY` | `-k`, `--key` | *(empty)* | The empty default intentionally disables relay key validation, avoiding key-pair setup and mismatch failures. To enable relay key validation, use the same non-empty key as `hbbs`; `-` / `_` have the same behavior and load or generate a key pair. An empty key allows clients without a matching key to use the relay, so choose this tradeoff deliberately on an exposed server. |
-| `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.17.** Local IPv4 or IPv6 address on which the relay TCP and WebSocket listeners bind. Supported by `.env` and the inherited environment; `hbbr` does not support `--config`. |
+| `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.1.** Local IPv4 or IPv6 address on which the relay TCP and WebSocket listeners bind. Supported by `.env` and the inherited environment; `hbbr` does not support `--config`. |
 | `PORT` | `-p`, `--port` | `21117` | Relay listening port. `hbbr` also binds `PORT+2` for WebSocket relay. **Note:** when set via the `PORT` env var (not `-p`), `hbbr` listens on `PORT + 1`, so a shared `PORT=21116` makes `hbbs`=21116 and `hbbr`=21117. |
 
 ### Relay bandwidth / QoS
@@ -102,12 +105,15 @@ Both can also be edited live through the `hbbr` loopback console (`ba`/`br`,
 ### Runtime console
 
 The runtime consoles are TCP command transports built into the services; they
-are not `rustdesk-utils` commands or interactive standard-input consoles. A
+are not `cortendesk-utils` commands or interactive standard-input consoles. A
 connection from a loopback address is treated as a single console command:
 
 ```bash
 # hbbs: toggle forced relay on PORT-1 (21115 by default)
 printf 'always-use-relay Y' | nc 127.0.0.1 21115
+
+# hbbs: show the device policy state
+printf 'policy' | nc 127.0.0.1 21115
 
 # hbbr: list commands on its relay PORT (21117 by default)
 printf 'h' | nc 127.0.0.1 21117
@@ -169,30 +175,22 @@ implementation.
 
 To supply your own key pair, place `id_ed25519` and `id_ed25519.pub` in the
 process's **current working directory** before first start. That directory may
-differ from the directory containing the executable. For the supervisor Docker
-image, the working directory is `/data`.
+differ from the directory containing the executable. In the CortenDesk Server
+image the working directory is `/root`.
 
 ---
 
-## Docker image variables
+## Docker image
 
-The supervisor image (`rustdesk/rustdesk-server-s6`) starts both binaries with
-s6 and adds a few convenience variables handled by its service scripts, **not**
-by `hbbs`/`hbbr` directly:
+The image (`ghcr.io/marcpope/cortendesk-server`, also on Docker Hub as
+`marcpope/cortendesk-server`) contains the binaries and nothing else. It runs
+`hbbs` by default; set the container command to `hbbr` for the relay. It has no
+convenience variables of its own: upstream's `RELAY`, `ENCRYPTED_ONLY`,
+`KEY_PUB` and `KEY_PRIV` belong to their s6 image and are ignored here. Pass
+`-r`, `-k` and the rest on the command line instead.
 
-| Variable | Default | Description |
-|---|---|---|
-| `RELAY` | `relay.example.com` | Passed to `hbbs` as `-r $RELAY` (your public address). |
-| `ENCRYPTED_ONLY` | `0` | `1` adds `-k _` to both servers. This is redundant for `hbbs`, whose default is `-`, and opts `hbbr` into key validation instead of its intentional empty default. |
-| `KEY_PUB` | *(unset)* | If set, written to `/data/id_ed25519.pub` on first start. |
-| `KEY_PRIV` | *(unset)* | If set, written to `/data/id_ed25519` on first start. Provide **both** `KEY_PUB` and `KEY_PRIV`, or neither. |
-
-Any variable from the tables above can also be passed straight through the
-container's environment (e.g. `-e ALWAYS_USE_RELAY=Y`, `-e RUST_LOG=debug`).
-
-The classic scratch image (`rustdesk/rustdesk-server`) contains only the
-binaries and does **not** implement `RELAY`, `ENCRYPTED_ONLY`, `KEY_PUB`, or
-`KEY_PRIV`; those variables are ignored by that image.
+Any variable from the tables above can be passed through the container's
+environment (e.g. `-e ALWAYS_USE_RELAY=Y`, `-e RUST_LOG=debug`).
 
 ---
 
@@ -218,21 +216,23 @@ PORT=22116
 
 ```yaml
 services:
-  rustdesk-server:
-    image: rustdesk/rustdesk-server-s6:latest
+  hbbs:
+    image: ghcr.io/marcpope/cortendesk-server:1
+    command: hbbs -r rustdesk.example.com:21117
     environment:
-      - RELAY=rustdesk.example.com:21117
       - ALWAYS_USE_RELAY=Y
       - RUST_LOG=info
+    ports: ["21115:21115", "21116:21116", "21116:21116/udp", "21118:21118"]
+    volumes: ["./data:/root"]
+    restart: unless-stopped
+
+  hbbr:
+    image: ghcr.io/marcpope/cortendesk-server:1
+    command: hbbr
+    environment:
       - SINGLE_BANDWIDTH=256
-    ports:
-      - "21115:21115"
-      - "21116:21116"
-      - "21116:21116/udp"
-      - "21117:21117"
-      - "21118:21118"
-      - "21119:21119"
-    volumes: ["./data:/data"]
+    ports: ["21117:21117", "21119:21119"]
+    volumes: ["./data:/root"]
     restart: unless-stopped
 ```
 
@@ -259,3 +259,8 @@ ExecStart=/usr/bin/hbbs
 
 Ports 21118/21119 are only needed for the web client; you can omit them
 otherwise.
+
+On those two ports both servers take the client address from the `X-Real-IP` or
+`X-Forwarded-For` header when one is present, without checking it (upstream
+issue #634). Put them behind a reverse proxy that sets these headers, and do not
+let clients reach them directly. The device policy does not use these headers.

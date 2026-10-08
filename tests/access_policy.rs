@@ -44,6 +44,7 @@ const PORT_INCOMING: i32 = 31176;
 const PORT_TOKEN: i32 = 31186;
 const PORT_OUTAGE: i32 = 31196;
 const PORT_LAN: i32 = 31206;
+const PORT_LAN_WS: i32 = 31216;
 
 const SECRET: &str = "test-link-secret";
 
@@ -582,4 +583,70 @@ async fn lan_address_is_reported_to_the_console() {
     assert_eq!(all[0]["id"], "lan-target");
     assert_eq!(all[0]["ip"], "192.168.77.20");
     assert!(all[0]["seen_at"].as_u64().unwrap() > 0);
+}
+
+/// A LAN address sent over WebSocket is attributed to the TCP peer, not to the
+/// X-Real-IP header, which any client reaching the port can set. The answer
+/// comes from 127.0.0.1, where the target registered, while the header claims
+/// another address: the report must still arrive.
+#[tokio::test]
+async fn lan_address_over_websocket_ignores_forwarded_headers() {
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Message},
+    };
+
+    let (url, console) = start_console(serde_json::json!({
+        "mode": "open", "allow": [], "incoming_only": [], "tokens": {}
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    let (_hbbs, key) = spawn_hbbs(dir.path(), PORT_LAN_WS, Some(&url));
+    wait_policy(PORT_LAN_WS, "mode=open").await;
+    let target = Peer::register(PORT_LAN_WS, "lan-ws-target").await;
+
+    let mut conn = punch(PORT_LAN_WS, &key, &target.id, "").await;
+    let fla = assert_forwarded(&mut conn, &target).await;
+
+    let mut req = format!("ws://127.0.0.1:{}", PORT_LAN_WS + 2)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("X-Real-IP", HeaderValue::from_static("203.0.113.9"));
+    let (mut ws, _) = connect_async(req).await.expect("websocket connects");
+    let mut msg = RendezvousMessage::new();
+    msg.set_local_addr(LocalAddr {
+        socket_addr: fla.socket_addr,
+        local_addr: AddrMangle::encode("192.168.77.30:50123".parse().unwrap()).into(),
+        id: target.id.clone(),
+        version: "1.4.3".to_owned(),
+        ..Default::default()
+    });
+    ws.send(Message::Binary(msg.write_to_bytes().unwrap()))
+        .await
+        .expect("answer sent");
+
+    match reply(&mut conn, 3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::PunchHoleResponse(ph))) => {
+            assert!(ph.is_local(), "the initiator gets the local address");
+        }
+        other => panic!("expected the local address, got {other:?}"),
+    }
+
+    let mut all = vec![];
+    for _ in 0..30 {
+        all = console
+            .lock()
+            .unwrap()
+            .reports
+            .iter()
+            .flat_map(|r| r["addrs"].as_array().cloned().unwrap_or_default())
+            .collect();
+        if !all.is_empty() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(all.len(), 1, "the report arrives once: {all:?}");
+    assert_eq!(all[0]["id"], "lan-ws-target");
+    assert_eq!(all[0]["ip"], "192.168.77.30");
 }

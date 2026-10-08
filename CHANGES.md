@@ -5,11 +5,79 @@ GNU Affero General Public License. It lists every change made to the original
 work, with the date it was made.
 
 **Base:** [rustdesk-server](https://github.com/rustdesk/rustdesk-server) release
-`1.1.16`, commit `73523b3`, published 2026-07-21. Copyright of the original work
-remains with its authors; see LICENSE and NOTICE.
+`1.1.17`, up to commit `a7736be` of 2026-08-07, merged in 1.1.1. Forked from
+release `1.1.16`, commit `73523b3`, published 2026-07-21. Copyright of the
+original work remains with its authors; see LICENSE and NOTICE.
 
 Versions below are CortenDesk Server versions. They are numbered independently
 of upstream so the two are never mistaken for each other.
+
+---
+
+## 1.1.1 (2026-10-08)
+
+### Merged upstream rustdesk-server 1.1.17
+
+Upstream changes from `73523b3` to `a7736be`, taken as they are:
+
+- `hbbs` ignores `PunchHoleSent` and `LocalAddr` arriving over UDP. Both made
+  the server send a reply to an address named inside the packet, which a
+  spoofed sender could aim at a third party (reflection/amplification).
+  Clients send these over TCP, which is unchanged.
+- A comment on the WebSocket listeners of `hbbs` and `hbbr` warning that
+  `X-Real-IP` / `X-Forwarded-For` are trusted as sent, so the WebSocket ports
+  belong behind a reverse proxy (upstream issue #634). Upstream changed no
+  code for this. See below for the one place this fork stopped trusting them.
+- `-b` / `--bind` / `BIND` on `hbbs` and `hbbr` to listen on one local address.
+  When that address does not cover `127.0.0.1`, the loopback admin port gets
+  its own listener on `127.0.0.1`.
+- Option names are matched ignoring case and `-` versus `_`, in flags, `.env`,
+  `--config` and the environment.
+- `hbbs --help` marks `-s`, `-R`, `-u` and `--mask` as deprecated. They still
+  work.
+- `docs/environment-variables.md`, a reference for every option.
+- protobuf 3.7.2, with a regression test for nested-message recursion
+  (`tests/protobuf_recursion.rs`).
+- `libs/hbb_common` moved to upstream's pin, `69cea8d`.
+
+Not carried: upstream's changes to files this fork does not ship
+(`.github/workflows/build.yaml`, `debian/changelog`, `ui/setup.nsi`), and the
+contributor instruction files `AGENTS.md` and its alias.
+
+### Changes made during the merge
+
+- The daily update check stays removed. Upstream's `main.rs` still called it;
+  that call is dropped, and imports it alone used are gone from
+  `src/common.rs`.
+- `src/policy.rs` reads `CORTENDESK_CONSOLE_URL`, `CORTENDESK_SERVER_SECRET`
+  and `CORTENDESK_POLICY_INTERVAL` through the same lookup as every other
+  option, so they now also work from `.env` and `--config`. Before, only the
+  process environment worked.
+- `docs/environment-variables.md` adapted to this fork: version numbers, the
+  policy variables, the `policy` admin command, `cortendesk-utils`, and this
+  project's Docker image (working directory `/root`, none of the s6 image's
+  variables) in place of upstream's images.
+- LAN address reports to the console take the sender from the TCP peer
+  address (`src/rendezvous_server.rs`). Before, they used the address `hbbs`
+  works with internally, which on the WebSocket port comes from `X-Real-IP` /
+  `X-Forwarded-For`. A client reaching that port directly could forge the
+  header and pass the check that the answer comes from the address the device
+  registered from. The punch hole and relay policy checks already used the TCP
+  peer. New test in `tests/access_policy.rs`.
+- OpenSSL is built from source (`openssl` crate, `vendored` feature) on Linux.
+  The new `hbb_common` links native-tls, which is OpenSSL on Linux, for both
+  the binaries and the build script, and the static musl builds have no
+  system OpenSSL to link against.
+- README: a short Configuration section pointing at that document.
+- `docs/environment-variables.md`: a note that the WebSocket ports trust
+  `X-Real-IP` / `X-Forwarded-For` and belong behind a reverse proxy.
+- NOTICE: `tests/protobuf_recursion.rs` comes from upstream, so the list of
+  files this project added names its two test files instead of all of
+  `tests/`.
+
+### Version
+
+Package version `1.1.1`.
 
 ---
 

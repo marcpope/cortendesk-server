@@ -343,12 +343,12 @@ fn save_cache(body: &str) {
 
 /// Start the console link if it is configured. Call from inside the runtime.
 pub fn start() {
-    let url = std::env::var("CORTENDESK_CONSOLE_URL")
+    let url = crate::common::get_arg_opt("CORTENDESK_CONSOLE_URL")
         .unwrap_or_default()
         .trim()
         .trim_end_matches('/')
         .to_owned();
-    let secret = std::env::var("CORTENDESK_SERVER_SECRET")
+    let secret = crate::common::get_arg_opt("CORTENDESK_SERVER_SECRET")
         .unwrap_or_default()
         .trim()
         .to_owned();
@@ -356,8 +356,7 @@ pub fn start() {
         log::info!("Console link off: set CORTENDESK_CONSOLE_URL and CORTENDESK_SERVER_SECRET to enforce device policy");
         return;
     }
-    let interval = std::env::var("CORTENDESK_POLICY_INTERVAL")
-        .ok()
+    let interval = crate::common::get_arg_opt("CORTENDESK_POLICY_INTERVAL")
         .and_then(|x| x.trim().parse::<u64>().ok())
         .unwrap_or(5)
         .clamp(1, 300);

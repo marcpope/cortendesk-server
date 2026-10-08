@@ -2,7 +2,9 @@
 // half of the signalling key exchange (`key_exchange_offer` /
 // `key_exchange_accept`, and the cipher carried on `TcpSink`). Modified on
 // 2026-09-29: device access policy checks on punch hole and relay requests,
-// and LAN address reports (`crate::policy`). See CHANGES.md.
+// and LAN address reports (`crate::policy`). Modified on 2026-10-08: LAN
+// address reports identify the sender by the TCP peer on WebSocket too.
+// See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -599,6 +601,9 @@ impl RendezvousServer {
                     allow_err!(self.handle_hole_sent(phs, addr, None).await);
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
+                    // The TCP peer, not `addr`: on WebSocket `addr` comes from
+                    // X-Real-IP / X-Forwarded-For, which any client can set.
+                    policy::note_local_addr(&la.id, AddrMangle::decode(&la.local_addr), peer_ip);
                     allow_err!(self.handle_local_addr(la, addr, None).await);
                 }
                 Some(rendezvous_message::Union::TestNatRequest(tar)) => {
@@ -718,7 +723,6 @@ impl RendezvousServer {
         socket: Option<&'a mut FramedSocket>,
     ) -> ResultType<()> {
         // relay local addrs of B to A
-        policy::note_local_addr(&la.id, AddrMangle::decode(&la.local_addr), addr.ip());
         let addr_a = AddrMangle::decode(&la.socket_addr);
         log::debug!(
             "{} local addrs response to {:?} from {:?}",
