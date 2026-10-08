@@ -1,0 +1,38 @@
+# cargo audit configuration, read by local runs and the security-scan
+# workflow. Advisories that a semver-compatible `cargo update` fixes are not
+# listed here: update the lockfile instead. Each entry below was checked
+# against what hbbs and hbbr actually run.
+
+[advisories]
+ignore = [
+  # libsqlite3-sys 0.24 bundles SQLite older than 3.39.2 (CVE-2022-35737).
+  # The overflow needs a string argument of billions of bytes passed to the
+  # C API. Every value the server stores comes from a single network frame.
+  # Fixed only by moving to sqlx 0.7 or later.
+  "RUSTSEC-2022-0090",
+
+  # sqlx 0.6 binary protocol casts. Affects the Postgres and MySQL drivers;
+  # this server only uses SQLite. Fixed in sqlx 0.8.1.
+  "RUSTSEC-2024-0363",
+
+  # rustls 0.20 complete_io loop. Pulled in by sqlx's runtime-tokio-rustls
+  # feature, which only opens TLS for Postgres and MySQL. SQLite never does.
+  # Goes away with sqlx 0.7 or later.
+  "RUSTSEC-2024-0336",
+
+  # ring AES functions can panic when overflow checks are enabled. Release
+  # builds run without overflow checks (Cargo's release default, not
+  # overridden in Cargo.toml). ring 0.16 has no fixed release.
+  "RUSTSEC-2025-0009",
+
+  # users: root appended to group listings. Only the group listing functions
+  # are affected; hbb_common uses get_current_uid and get_user_by_uid. No
+  # fixed release exists.
+  "RUSTSEC-2025-0040",
+
+  # quick-xml quadratic attribute check and namespace allocation. Reached only
+  # through wayland-scanner, which parses Wayland protocol XML shipped inside
+  # the crate at build time. Nothing parses XML at runtime.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]

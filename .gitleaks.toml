@@ -1,0 +1,15 @@
+# gitleaks config for the security-scan workflow.
+[extend]
+useDefault = true
+
+# Old upstream READMEs (2022-2024, since removed) showed two example key
+# pairs in their Docker and key generation sections. They are published
+# documentation values, not keys anyone deployed from this repository.
+[allowlist]
+description = "Example key pairs from upstream README history"
+regexes = [
+  '''FR2j78IxfwJNR\+HjLluQ2Nh7eEryEeIZCwiQDPVe\+PaITKyShphHAsPLn7So0OqRs92nGvSRdFJnE2MSyrKTIQ==''',
+  '''iEyskoaYRwLDy5\+0qNDqkbPdpxr0kXRSZxNjEsqykyE=''',
+  '''8BLLhtzUBU/XKAH4mep3p\+IX4DSApe7qbAwNH9nv4yA=''',
+  '''egAVd44u33ZEUIDTtksGcHeVeAwywarEdHmf99KM5ajwEsuG3NQFT9coAfiZ6nen4hfgNICl7upsDA0f2e/jIA==''',
+]

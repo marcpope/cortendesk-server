@@ -1,0 +1,41 @@
+name: Security scan
+
+# cargo audit and gitleaks fail the build. Code analysis runs separately in
+# codeql.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 6 * * 1'   # weekly, to catch new advisories for locked dependencies
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Fails on vulnerability advisories in Cargo.lock. Unmaintained, unsound
+  # and yanked crates are printed as warnings only. Accepted advisories are
+  # listed, with reasons, in .cargo/audit.toml.
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22
+      - run: cargo audit
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0 \
+            git /repo --config /repo/.gitleaks.toml --no-banner --redact --exit-code 1
