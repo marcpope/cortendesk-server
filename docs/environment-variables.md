@@ -222,7 +222,7 @@ services:
     environment:
       - ALWAYS_USE_RELAY=Y
       - RUST_LOG=info
-    ports: ["21115:21115", "21116:21116", "21116:21116/udp", "21118:21118"]
+    ports: ["21115:21115", "21116:21116", "21116:21116/udp"]
     volumes: ["./data:/root"]
     restart: unless-stopped
 
@@ -231,10 +231,16 @@ services:
     command: hbbr
     environment:
       - SINGLE_BANDWIDTH=256
-    ports: ["21117:21117", "21119:21119"]
+    ports: ["21117:21117"]
     volumes: ["./data:/root"]
     restart: unless-stopped
 ```
+
+Leave 21118/21119 (WebSocket) unpublished unless you have RustDesk clients in
+WebSocket mode. Then put them behind a reverse proxy that sets `X-Real-IP`:
+hbbs and hbbr take the client address from that header on WebSocket
+connections, so a directly exposed port lets a client claim any address.
+
 
 ### systemd
 

@@ -61,17 +61,23 @@ services:
   hbbs:
     image: ghcr.io/marcpope/cortendesk-server:1
     command: hbbs -r relay.example.com:21117
-    ports: ["21115:21115", "21116:21116", "21116:21116/udp", "21118:21118"]
+    ports: ["21115:21115", "21116:21116", "21116:21116/udp"]
     volumes: ["./data:/root"]
     restart: unless-stopped
 
   hbbr:
     image: ghcr.io/marcpope/cortendesk-server:1
     command: hbbr
-    ports: ["21117:21117", "21119:21119"]
+    ports: ["21117:21117"]
     volumes: ["./data:/root"]
     restart: unless-stopped
 ```
+
+Leave 21118/21119 (WebSocket) unpublished unless you have RustDesk clients in
+WebSocket mode. Then put them behind a reverse proxy that sets `X-Real-IP`:
+hbbs and hbbr take the client address from that header on WebSocket
+connections, so a directly exposed port lets a client claim any address.
+
 
 Also published to `docker.io/marcpope/cortendesk-server`. Static `linux/amd64`
 and `linux/arm64` binaries are attached to each
