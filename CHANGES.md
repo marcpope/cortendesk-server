@@ -49,6 +49,10 @@ all of it, so those clients fall back to their other transports.
   0. Upstream gives every such client behind one IP the same key, so a reply
   could go to the wrong one; routes keep connections open long enough to make
   that likely.
+- Dependencies brought in by the newer `hbb_common` updated: rustls 0.23.46,
+  rustls-webpki 0.103.16, webpki-roots and webpki-root-certs 1.0.11, zstd-sys
+  2.1.2. Advisories that no compatible update fixes are listed, with the
+  reason they do not reach `hbbs` or `hbbr`, in `.cargo/audit.toml`.
 - Known limitation: candidates sent towards the controller are not checked
   against the device's own address. A sender would need the controller's
   address and source port within the route's 60 seconds.

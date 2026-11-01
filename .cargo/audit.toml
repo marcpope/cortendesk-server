@@ -35,4 +35,26 @@ ignore = [
   # the crate at build time. Nothing parses XML at runtime.
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
+
+  # rustls 0.20 ServerHello downgrade and webpki-roots 0.22 distrusted emSign
+  # roots. Both come in only through sqlx's runtime-tokio-rustls feature,
+  # which opens TLS for Postgres and MySQL. This server uses SQLite, which
+  # never does. Go away with sqlx 0.7 or later.
+  "RUSTSEC-2026-0349",
+  "RUSTSEC-2026-0381",
+
+  # zstd 0.13 / zstd-safe 7: a reused stream context leaking data, legacy
+  # frame decompression exposing uninitialised memory, and seekable
+  # decompression past the end. hbb_common pins zstd 0.13 (the fixes are in
+  # 0.14 / zstd-safe 8) and only calls bulk compression and a plain stream
+  # decoder for client message payloads. hbbs and hbbr never compress or
+  # decompress: they forward messages as they are.
+  "RUSTSEC-2026-0391",
+  "RUSTSEC-2026-0398",
+  "RUSTSEC-2026-0403",
+
+  # crypto-bigint 0.5 timing variability. Present in Cargo.lock but not in
+  # the build for any target (`cargo tree -i crypto-bigint --target all -e
+  # all` finds no dependent), so it is never compiled.
+  "RUSTSEC-2026-0387",
 ]
