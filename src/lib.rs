@@ -4,4 +4,5 @@ pub mod common;
 mod database;
 mod peer;
 mod policy;
+mod webrtc_signal;
 mod version;

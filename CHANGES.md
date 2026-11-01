@@ -14,6 +14,46 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## 1.2.0 (2026-11-01)
+
+### WebRTC signalling for RustDesk 1.5 clients (2026-11-01)
+
+RustDesk 1.5 can connect over WebRTC when the controlling client has
+`enable-webrtc` on. The client puts an SDP offer in its punch hole request and
+both sides then exchange ICE candidates through `hbbs`. Upstream `hbbs` drops
+all of it, so those clients fall back to their other transports.
+
+- `libs/hbb_common` moved to `229b904`, the commit RustDesk 1.5.0 builds
+  with, for the new message fields.
+- `hbbs` passes the offer to the device in `PunchHole`, and the device's
+  answer back in `PunchHoleResponse` or `RelayResponse`.
+- `hbbs` forwards `IceCandidate` messages: from the controller to the device
+  it offered to, by device ID, and from the device to the controller, by the
+  controller's address. The controller's connection stays open for the
+  exchange instead of closing after the first reply.
+- New `src/webrtc_signal.rs` keeps one route per offering connection. Only a
+  connection that sent an offer the access policy allowed can send candidates,
+  only to that device, at most 64 each way, for at most 60 seconds.
+- Offers on a connection that is not encrypted are dropped, since offers,
+  answers and candidates carry both machines' addresses. RustDesk 1.5 only
+  offers on an encrypted connection.
+- A route holds at most 64 messages towards the controller, answers and
+  replies included, and one IP can hold at most 64 routes at once. Offers and
+  answers are capped at 16 KB.
+- Writes to a client connection time out after 5 seconds, so a client that
+  stops reading cannot hold replies queued behind it. This also covers the
+  ordinary punch-hole reply, which upstream sends without a timeout. A route
+  whose connection fails a write is dropped.
+- A WebSocket connection whose client address comes from `X-Real-IP` or
+  `X-Forwarded-For` is keyed by that IP and its own connection port, not port
+  0. Upstream gives every such client behind one IP the same key, so a reply
+  could go to the wrong one; routes keep connections open long enough to make
+  that likely.
+- Known limitation: candidates sent towards the controller are not checked
+  against the device's own address. A sender would need the controller's
+  address and source port within the route's 60 seconds.
+- New test `tests/webrtc_signalling.rs`.
+
 ## 1.1.1 (2026-10-08)
 
 ### Merged upstream rustdesk-server 1.1.17

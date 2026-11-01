@@ -3,8 +3,9 @@
 ID/rendezvous (`hbbs`) and relay (`hbbr`) servers for RustDesk clients.
 
 This is a fork of [rustdesk-server](https://github.com/rustdesk/rustdesk-server),
-in sync with upstream release 1.1.17, with one change that matters:
-**signed-in clients can connect.**
+in sync with upstream release 1.1.17, with two changes that matter:
+**signed-in clients can connect**, and **RustDesk 1.5 clients can connect over
+WebRTC** (since 1.2.0).
 
 It is a drop-in replacement. Same binaries, same ports, same command-line flags,
 same data files — point your existing compose file at these images and nothing
@@ -45,6 +46,11 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
 - `hbbr` is untouched. Clients never run this exchange against the relay.
 - WebSocket connections are untouched. Clients skip the exchange there because
   the transport handles encryption, so offering it would only confuse them.
+- WebRTC signalling for RustDesk 1.5 clients: `hbbs` passes the WebRTC offer,
+  answer and ICE candidates between the two machines, so a client with
+  `enable-webrtc` on can connect over WebRTC. Upstream `hbbs` drops them and
+  those clients fall back to their other transports. Only on encrypted
+  connections, and only between the two machines in the request.
 - Optional device policy from a CortenDesk console: refuse devices the
   console has not approved, and devices marked incoming-only. Off unless
   configured; see below.
