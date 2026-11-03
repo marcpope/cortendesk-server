@@ -253,6 +253,8 @@ async fn offer_answer_and_candidates_travel_between_the_two() {
     };
     assert_eq!(ph.webrtc_sdp_offer, "webrtc://b2ZmZXI=");
     assert_eq!(AddrMangle::decode(&ph.socket_addr), controller.local_addr());
+    // The device echoes this in its connection audit (issue #130).
+    assert_eq!(ph.controlled_context.conn_audit_ref, "cd1/punch-webrtc");
 
     // The device trickles over a connection of its own, which stays open.
     let mut trickle = Conn::open(PORT_EXCHANGE, DEVICE_IP, Some(&pk)).await;
@@ -303,6 +305,7 @@ async fn an_unencrypted_offer_is_dropped() {
         other => panic!("expected a punch hole, got {other:?}"),
     };
     assert!(ph.webrtc_sdp_offer.is_empty(), "the offer is not passed on");
+    assert_eq!(ph.controlled_context.conn_audit_ref, "cd1/punch");
 
     controller.send(candidate(&device.id, &[], "controller-1")).await;
     assert!(device.forwarded(1000).await.is_none(), "no candidates to the device");

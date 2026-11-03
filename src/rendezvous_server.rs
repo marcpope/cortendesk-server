@@ -61,6 +61,8 @@ enum Data {
 }
 
 const REG_TIMEOUT: i64 = 30_000;
+/// Versioned so the console can tell our tags from anything else in the field.
+const AUDIT_REF_PREFIX: &str = "cd1/";
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 
@@ -617,6 +619,7 @@ impl RendezvousServer {
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
+                        rf.controlled_context = Self::audit_context("relay");
                         msg_out.set_request_relay(rf);
                         let peer_addr = peer.read().await.socket_addr;
                         self.tx.send(Data::Msg(msg_out.into(), peer_addr)).ok();
@@ -904,6 +907,7 @@ impl RendezvousServer {
                 msg_out.set_fetch_local_addr(FetchLocalAddr {
                     socket_addr,
                     relay_server,
+                    controlled_context: Self::audit_context("lan"),
                     ..Default::default()
                 });
             } else {
@@ -927,10 +931,12 @@ impl RendezvousServer {
                 } else {
                     String::new()
                 };
+                let path = if webrtc_sdp_offer.is_empty() { "punch" } else { "punch-webrtc" };
                 msg_out.set_punch_hole(PunchHole {
                     socket_addr,
                     nat_type: ph.nat_type,
                     relay_server,
+                    controlled_context: Self::audit_context(path),
                     webrtc_sdp_offer,
                     ..Default::default()
                 });
@@ -1113,6 +1119,18 @@ impl RendezvousServer {
         }
         // Moved into a route, which only an encrypted connection can open.
         self.webrtc.lock().await.contains(addr, Instant::now())
+    }
+
+    /// How hbbs set this connection up, for the console's connection log
+    /// (issue #130). RustDesk 1.5+ devices echo `conn_audit_ref` back
+    /// unchanged in their connection audit; older ones ignore it. The console
+    /// reads the part after `cd1/`, and decides relay separately from what
+    /// hbbr reports, since a punch hole can still end up relayed.
+    fn audit_context(path: &str) -> MessageField<ControlledContext> {
+        MessageField::some(ControlledContext {
+            conn_audit_ref: format!("{AUDIT_REF_PREFIX}{path}"),
+            ..Default::default()
+        })
     }
 
     fn checked_answer(answer: String) -> String {

@@ -14,6 +14,30 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## 1.3.0 (unreleased)
+
+### Connection paths for the console's connection log (2026-11-03)
+
+A device's connection audit does not say how the session got through. The
+console now shows it per connection (CortenDesk issue #130).
+
+- `hbbs` puts a tag in `controlled_context.conn_audit_ref` of every
+  `PunchHole` (`cd1/punch`, or `cd1/punch-webrtc` with a WebRTC offer),
+  `FetchLocalAddr` (`cd1/lan`) and forwarded `RequestRelay` (`cd1/relay`).
+  RustDesk 1.5 devices echo it unchanged in their connection audit.
+- `hbbr` keeps the first side's request while it waits for the second, so the
+  pair knows the device ID and connection type from the controller's request,
+  whichever side arrives first.
+- New `src/relay_report.rs`: `hbbr` reports each pair to the console at
+  `POST /api/server/relay-sessions` when it forms and again when it closes,
+  with both peers' addresses and the bytes it carried. Reports are batched
+  every 5 seconds, up to 5000 kept while the console is unreachable. It runs
+  only with `CORTENDESK_CONSOLE_URL` and `CORTENDESK_SERVER_SECRET` set, the
+  same two settings `hbbs` uses.
+- Tests: `tests/relay_report.rs` against a real `hbbr` and a stand-in
+  console; the tags are checked in `tests/access_policy.rs` and
+  `tests/webrtc_signalling.rs`.
+
 ## 1.2.0 (2026-11-01)
 
 ### WebRTC signalling for RustDesk 1.5 clients (2026-11-01)

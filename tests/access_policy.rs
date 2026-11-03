@@ -346,6 +346,8 @@ async fn assert_forwarded(conn: &mut Conn, target: &Peer) -> FetchLocalAddr {
         other => panic!("{} should have been asked for its local address, got {other:?}", target.id),
     };
     assert!(reply(conn, 300).await.is_none(), "the initiator must not be refused");
+    // The device echoes this in its connection audit (issue #130).
+    assert_eq!(fla.controlled_context.conn_audit_ref, "cd1/lan");
     fla
 }
 
@@ -418,6 +420,14 @@ async fn pending_initiator_is_refused_until_approved() {
 
     let mut conn = punch(PORT_APPROVE, &key, &target.id, "").await;
     assert_forwarded(&mut conn, &target).await;
+
+    let _conn = request_relay(PORT_APPROVE, &target.id, "").await;
+    match target.forwarded(3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::RequestRelay(rr))) => {
+            assert_eq!(rr.controlled_context.conn_audit_ref, "cd1/relay");
+        }
+        other => panic!("expected the relay request at the target, got {other:?}"),
+    }
 }
 
 /// Approved-only mode: an approved device cannot reach an unapproved one.

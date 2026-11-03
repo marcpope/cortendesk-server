@@ -30,8 +30,18 @@ use std::{
 
 type Usage = (usize, usize, usize, usize);
 
+/// The first side of a pair, held until the other arrives. Its request is
+/// kept too: only the controller's names the device and the connection type,
+/// and either side may come first (issue #130).
+struct Waiting {
+    stream: Box<dyn StreamTrait>,
+    id: String,
+    conn_type: i32,
+    addr: SocketAddr,
+}
+
 lazy_static::lazy_static! {
-    static ref PEERS: Mutex<HashMap<String, Box<dyn StreamTrait>>> = Default::default();
+    static ref PEERS: Mutex<HashMap<String, Waiting>> = Default::default();
     static ref USAGE: RwLock<HashMap<String, Usage>> = Default::default();
     static ref BLACKLIST: RwLock<HashSet<String>> = Default::default();
     static ref BLOCKLIST: RwLock<HashSet<String>> = Default::default();
@@ -98,6 +108,7 @@ pub async fn start_with_bind(
             .await;
         }
     };
+    crate::relay_report::start();
     let listen_signal = crate::common::listen_signal();
     tokio::select!(
         res = main_task => res,
@@ -468,9 +479,15 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     return;
                 }
                 if !rf.uuid.is_empty() {
-                    let mut peer = PEERS.lock().await.remove(&rf.uuid);
-                    if let Some(peer) = peer.as_mut() {
+                    let mut waiting = PEERS.lock().await.remove(&rf.uuid);
+                    if let Some(waiting) = waiting.as_mut() {
                         log::info!("Relayrequest {} from {} got paired", rf.uuid, addr);
+                        let report = crate::relay_report::opened(
+                            &rf.uuid,
+                            (&rf.id, rf.conn_type.value(), addr),
+                            (&waiting.id, waiting.conn_type, waiting.addr),
+                        );
+                        let peer = &mut waiting.stream;
                         let id = format!("{}:{}", addr.ip(), addr.port());
                         USAGE.write().await.insert(id.clone(), Default::default());
                         if !stream.is_ws() && !peer.is_ws() {
@@ -478,16 +495,29 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                             stream.set_raw();
                             log::info!("Both are raw");
                         }
-                        if let Err(err) = relay(addr, &mut stream, peer, limiter, id.clone()).await
+                        let mut carried = 0;
+                        if let Err(err) =
+                            relay(addr, &mut stream, peer, limiter, id.clone(), &mut carried).await
                         {
                             log::info!("Relay of {} closed: {}", addr, err);
                         } else {
                             log::info!("Relay of {} closed", addr);
                         }
                         USAGE.write().await.remove(&id);
+                        if let Some(report) = report {
+                            crate::relay_report::closed(report, carried);
+                        }
                     } else {
                         log::info!("New relay request {} from {}", rf.uuid, addr);
-                        PEERS.lock().await.insert(rf.uuid.clone(), Box::new(stream));
+                        PEERS.lock().await.insert(
+                            rf.uuid.clone(),
+                            Waiting {
+                                stream: Box::new(stream),
+                                id: rf.id.clone(),
+                                conn_type: rf.conn_type.value(),
+                                addr,
+                            },
+                        );
                         sleep(30.).await;
                         PEERS.lock().await.remove(&rf.uuid);
                     }
@@ -503,6 +533,7 @@ async fn relay(
     peer: &mut Box<dyn StreamTrait>,
     total_limiter: Limiter,
     id: String,
+    carried: &mut usize,
 ) -> ResultType<()> {
     let ip = addr.ip().to_string();
     let mut tm = std::time::Instant::now();
@@ -533,6 +564,7 @@ async fn relay(
                     total_limiter.consume(nb).await;
                     total += nb;
                     total_s += nb;
+                    *carried += bytes.len();
                     if !bytes.is_empty() {
                         stream.send_raw(bytes.into()).await?;
                     }
@@ -552,6 +584,7 @@ async fn relay(
                     total_limiter.consume(nb).await;
                     total += nb;
                     total_s += nb;
+                    *carried += bytes.len();
                     if !bytes.is_empty() {
                         peer.send_raw(bytes.into()).await?;
                     }
