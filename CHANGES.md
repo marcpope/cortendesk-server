@@ -16,6 +16,24 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: punch request log capped, peer IDs at most 253 bytes (2026-11-04)
+
+Issue #5. Ported from upstream rustdesk-server commit 5e37f45, which came after
+this fork's base.
+
+- The log behind the `punch-requests` admin command keeps at most
+  `MAX_PUNCH_REQUESTS` entries (default 100000; `0` keeps none) and drops the
+  oldest. Before, every punch request that was not a recent duplicate was
+  added and nothing was ever removed.
+- Peer IDs over 253 bytes are refused: `RegisterPk` over UDP, TCP and
+  WebSocket answers `UUID_MISMATCH`, as it does for IDs under 6, before the
+  per-ID registration lock is taken; UDP `RegisterPeer` gets no reply; a punch
+  hole request answers `ID_NOT_EXIST`. Before, IDs had only a minimum length.
+- `docs/environment-variables.md`: `MAX_PUNCH_REQUESTS`.
+- Tests: a unit test for the cap in `src/rendezvous_server.rs`; in
+  `tests/stream_registration.rs`, a 254-byte ID refused on each path and a
+  253-byte one accepted.
+
 ### hbbs: `always-use-relay` leaves the relay list alone (2026-11-04)
 
 Issue #4. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 716.

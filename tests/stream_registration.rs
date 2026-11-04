@@ -647,3 +647,59 @@ async fn ws_relay_request_is_tagged_and_each_request_gets_one_reply() {
     .await;
     assert!(extra.is_err(), "an unrequested reply got through: {extra:?}");
 }
+
+async fn udp_exchange(udp: &UdpSocket, port: u16, msg: RendezvousMessage) -> Option<RendezvousMessage> {
+    udp.send_to(&msg.write_to_bytes().unwrap(), ("127.0.0.1", port))
+        .await
+        .unwrap();
+    let mut buf = [0; 1024];
+    match timeout(Duration::from_millis(500), udp.recv_from(&mut buf)).await {
+        Ok(Ok((n, _))) => Some(RendezvousMessage::parse_from_bytes(&buf[..n]).unwrap()),
+        _ => None,
+    }
+}
+
+/// Peer IDs over 253 bytes are refused on every path an ID comes in by
+/// (issue #5): RegisterPk over WebSocket and UDP, RegisterPeer over UDP and
+/// punch hole requests.
+#[tokio::test]
+async fn ids_over_253_bytes_are_refused() {
+    let server = Server::start().await;
+    let longest = "7".repeat(253);
+    let too_long = "8".repeat(254);
+    let mut ws = server.ws().await;
+    send(&mut ws, registration(&too_long, b"uuid-too-long")).await;
+    assert_eq!(
+        recv(&mut ws).await.register_pk_response().result.enum_value(),
+        Ok(register_pk_response::Result::UUID_MISMATCH)
+    );
+    register(&mut ws, &longest).await;
+
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let udp_reply = |msg: RendezvousMessage| udp_exchange(&udp, server.port, msg);
+    let reply = udp_reply(registration(&too_long, b"uuid-too-long")).await.unwrap();
+    assert_eq!(
+        reply.register_pk_response().result.enum_value(),
+        Ok(register_pk_response::Result::UUID_MISMATCH)
+    );
+    let register_peer = |id: &str| {
+        let mut msg = RendezvousMessage::new();
+        msg.set_register_peer(RegisterPeer {
+            id: id.to_owned(),
+            ..Default::default()
+        });
+        msg
+    };
+    assert!(udp_reply(register_peer(&too_long)).await.is_none());
+    assert!(udp_reply(register_peer(&longest)).await.unwrap().has_register_peer_response());
+
+    let mut initiator = server.ws().await;
+    send(&mut initiator, punch(&too_long, &server.key)).await;
+    assert_eq!(
+        recv(&mut initiator).await.punch_hole_response().failure.enum_value(),
+        Ok(punch_hole_response::Failure::ID_NOT_EXIST)
+    );
+    let mut initiator = server.ws().await;
+    send(&mut initiator, punch(&longest, &server.key)).await;
+    assert!(recv(&mut ws).await.has_punch_hole());
+}

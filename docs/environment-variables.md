@@ -50,6 +50,7 @@ in the inherited process environment.
 | `ALWAYS_USE_RELAY` 🅴 | *(none)* | `N` | `Y` forces every session through a relay (disables direct/hole‑punched connections). At runtime, send `always-use-relay Y` or `always-use-relay N` to the `hbbs` [loopback console](#runtime-console). |
 | `DB_URL` 🅴 | *(none)* | `./db_v2.sqlite3` | Path/URL of the SQLite database file. See [Database](#database). |
 | `MAX_DATABASE_CONNECTIONS` 🅴 | *(none)* | `1` | Size of the SQLite connection pool. |
+| `MAX_PUNCH_REQUESTS` | *(none)* | `100000` | **Available since 1.3.1.** Punch requests kept in memory for the `punch-requests` [console](#runtime-console) command; the oldest is dropped when full. `0` keeps none. |
 | `CORTENDESK_CONSOLE_URL` | *(none)* | *(empty)* | Base URL of a CortenDesk console, for device policy. See the [README](../README.md#device-policy-from-a-cortendesk-console). |
 | `CORTENDESK_SERVER_SECRET` | *(none)* | *(empty)* | Secret shared with that console. Policy stays off unless this and `CORTENDESK_CONSOLE_URL` are both set. |
 | `CORTENDESK_POLICY_INTERVAL` | *(none)* | `5` | Seconds between policy fetches, 1 to 300. |

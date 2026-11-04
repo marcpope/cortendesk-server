@@ -1,6 +1,6 @@
 // Modified by the CortenDesk Server project on 2026-11-03: registration over a
 // persistent TCP or WebSocket stream (`Peer::stream`), based on PR #1 by
-// vk2amv. See
+// vk2amv. Modified on 2026-11-04: `MAX_PEER_ID_LEN`. See
 // CHANGES.md. This file is part of a modified version of rustdesk-server,
 // distributed under the AGPL-3.0 like the original.
 
@@ -29,6 +29,9 @@ pub const IP_CHANGE_DUR: u64 = 180;
 pub const IP_CHANGE_DUR_X2: u64 = IP_CHANGE_DUR * 2;
 pub const DAY_SECONDS: u64 = 3600 * 24;
 pub const IP_BLOCK_DUR: u64 = 60;
+/// Longest peer ID accepted, in bytes. Every peer entry and punch request
+/// record keeps its own copy, and a real ID is far shorter.
+pub const MAX_PEER_ID_LEN: usize = 253;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub(crate) struct PeerInfo {

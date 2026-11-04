@@ -9,7 +9,8 @@
 // connection path tags (`conn_audit_ref`); persistent TCP and WebSocket
 // registration for desktop clients and the client address from trusted
 // proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
-// `always-use-relay` leaves the relay list alone. See CHANGES.md.
+// `always-use-relay` leaves the relay list alone; the punch request log is
+// capped and peer IDs are at most 253 bytes. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -53,7 +54,7 @@ use hbb_common::{
 use ipnetwork::Ipv4Network;
 use sodiumoxide::crypto::{box_, secretbox, sign};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::Arc,
@@ -186,8 +187,33 @@ use once_cell::sync::Lazy;
 use tokio::sync::Mutex as TokioMutex; // differentiate if needed
 #[derive(Clone)]
 struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
-static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
+static PUNCH_REQS: Lazy<TokioMutex<VecDeque<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(VecDeque::new()));
 const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
+/// Records kept for the `punch-requests` command, oldest dropped first.
+/// `MAX_PUNCH_REQUESTS`, default 100000; 0 keeps none.
+static PUNCH_REQ_MAX: Lazy<usize> =
+    Lazy::new(|| get_arg("MAX_PUNCH_REQUESTS").parse().unwrap_or(100_000));
+
+async fn record_punch_req(from_ip: String, to_ip: String, to_id: String) {
+    let max = *PUNCH_REQ_MAX;
+    if max == 0 {
+        return;
+    }
+    let mut lock = PUNCH_REQS.lock().await;
+    let mut dup = false;
+    for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
+        if e.from_ip == from_ip && e.to_id == to_id {
+            if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
+            break;
+        }
+    }
+    if !dup {
+        while lock.len() >= max {
+            lock.pop_front();
+        }
+        lock.push_back(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id });
+    }
+}
 
 #[derive(Clone)]
 struct Inner {
@@ -481,7 +507,7 @@ impl RendezvousServer {
             match msg_in.union {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) => {
                     // B registered
-                    if !rp.id.is_empty() {
+                    if !rp.id.is_empty() && rp.id.len() <= MAX_PEER_ID_LEN {
                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                         self.update_addr(rp.id, addr, socket).await?;
                         if self.inner.serial > rp.serial {
@@ -558,6 +584,9 @@ impl RendezvousServer {
         if rk.uuid.is_empty() || rk.pk.is_empty() {
             return register_pk_response::Result::INVALID_ID_FORMAT;
         }
+        if rk.id.len() < 6 || rk.id.len() > MAX_PEER_ID_LEN {
+            return UUID_MISMATCH;
+        }
         // One registration per ID at a time, so two cannot both claim an
         // empty identity. Other IDs are not held up. The UDP loop never waits:
         // if this ID is being registered elsewhere it answers TOO_FREQUENT and
@@ -589,9 +618,7 @@ impl RendezvousServer {
     ) -> register_pk_response::Result {
         let id = rk.id;
         let ip = addr.ip().to_string();
-        if id.len() < 6 {
-            return UUID_MISMATCH;
-        } else if !self.check_ip_blocker(&ip, &id).await {
+        if !self.check_ip_blocker(&ip, &id).await {
             return TOO_FREQUENT;
         }
         let peer = self.pm.get_or(&id).await;
@@ -980,6 +1007,14 @@ impl RendezvousServer {
             });
             return Ok((msg_out, None));
         }
+        if ph.id.len() > MAX_PEER_ID_LEN {
+            let mut msg_out = RendezvousMessage::new();
+            msg_out.set_punch_hole_response(PunchHoleResponse {
+                failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
+                ..Default::default()
+            });
+            return Ok((msg_out, None));
+        }
         if let Err(reason) = policy::check_initiator(&ph.token, peer_ip, &ph.id) {
             log::info!("Policy: refused punch from {} to {}: {}", peer_ip, ph.id, reason);
             let refusal =
@@ -1014,20 +1049,12 @@ impl RendezvousServer {
                 None => unreachable!(),
             };
             // record punch hole request (from addr -> peer id/peer_addr)
-            {
-                let from_ip = try_into_v4(addr).ip().to_string();
-                let to_ip = try_into_v4(peer_addr).ip().to_string();
-                let to_id_clone = id.clone();
-                let mut lock = PUNCH_REQS.lock().await;
-                let mut dup = false;
-                for e in lock.iter().rev().take(30) { // only check recent tail subset for speed
-                    if e.from_ip == from_ip && e.to_id == to_id_clone {
-                        if e.tm.elapsed().as_secs() < PUNCH_REQ_DEDUPE_SEC { dup = true; }
-                        break;
-                    }
-                }
-                if !dup { lock.push(PunchReqEntry { tm: Instant::now(), from_ip, to_ip, to_id: to_id_clone }); }
-            }
+            record_punch_req(
+                try_into_v4(addr).ip().to_string(),
+                try_into_v4(peer_addr).ip().to_string(),
+                id.clone(),
+            )
+            .await;
 
             let mut msg_out = RendezvousMessage::new();
             let peer_is_lan = self.is_lan(peer_addr);
@@ -2280,5 +2307,27 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+
+    #[hbb_common::tokio::test]
+    async fn punch_reqs_bounded() {
+        let max = *PUNCH_REQ_MAX;
+        // 31 ids keep every request just outside the 30-entry dedupe window;
+        // at least one request, so MAX_PUNCH_REQUESTS=0 is exercised too.
+        for i in 0..(max * 2).max(1) {
+            record_punch_req(
+                "1.2.3.4".to_owned(),
+                "5.6.7.8".to_owned(),
+                format!("peer{}", i % 31),
+            )
+            .await;
+        }
+        let lock = PUNCH_REQS.lock().await;
+        assert_eq!(lock.len(), max);
+        if max > 0 {
+            // The oldest half is dropped and the newest kept.
+            assert_eq!(lock.front().unwrap().to_id, format!("peer{}", max % 31));
+            assert_eq!(lock.back().unwrap().to_id, format!("peer{}", (max * 2 - 1) % 31));
+        }
     }
 }
