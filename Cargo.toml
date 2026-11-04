@@ -44,6 +44,7 @@ jsonwebtoken = "8"
 headers = "0.3"
 once_cell = "1.8"
 sodiumoxide = "0.2"
+tempfile = "3"
 tokio-tungstenite = "0.26"
 tungstenite = "0.26"
 regex = "1.4"
@@ -70,7 +71,7 @@ reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocki
 openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
-tempfile = "3"
+libc = "0.2"
 
 [build-dependencies]
 hbb_common = { path = "libs/hbb_common" }

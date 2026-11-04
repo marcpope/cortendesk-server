@@ -1564,6 +1564,7 @@ dependencies = [
  "ipnetwork",
  "jsonwebtoken",
  "lazy_static",
+ "libc",
  "local-ip-address",
  "mac_address",
  "machine-uid 0.2.0",

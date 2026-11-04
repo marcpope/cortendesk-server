@@ -10,7 +10,8 @@
 // registration for desktop clients and the client address from trusted
 // proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
 // `always-use-relay` leaves the relay list alone; the punch request log is
-// capped and peer IDs are at most 253 bytes. See CHANGES.md.
+// capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`.
+// See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -261,7 +262,7 @@ impl RendezvousServer {
         rmem: usize,
     ) -> ResultType<()> {
         init_trusted_proxies()?;
-        let (key, sk) = Self::get_server_sk(key);
+        let (key, sk) = Self::get_server_sk(key)?;
         let nat_port = port - 1;
         let ws_port = port + 2;
         let pm = PeerMap::new().await?;
@@ -1941,7 +1942,7 @@ impl RendezvousServer {
     }
 
     #[inline]
-    fn get_server_sk(key: &str) -> (String, Option<sign::SecretKey>) {
+    fn get_server_sk(key: &str) -> ResultType<(String, Option<sign::SecretKey>)> {
         let mut out_sk = None;
         let mut key = key.to_owned();
         if let Ok(sk) = base64::decode(&key) {
@@ -1955,7 +1956,7 @@ impl RendezvousServer {
         }
 
         if key.is_empty() || key == "-" || key == "_" {
-            let (pk, sk) = crate::common::gen_sk(0);
+            let (pk, sk) = crate::common::gen_sk(0)?;
             out_sk = sk;
             if !key.is_empty() {
                 key = pk;
@@ -1965,7 +1966,7 @@ impl RendezvousServer {
         if !key.is_empty() {
             log::info!("Key: {}", key);
         }
-        (key, out_sk)
+        Ok((key, out_sk))
     }
 
     #[inline]

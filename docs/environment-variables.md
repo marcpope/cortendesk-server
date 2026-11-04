@@ -181,6 +181,17 @@ process's **current working directory** before first start. That directory may
 differ from the directory containing the executable. In the CortenDesk Server
 image the working directory is `/root`.
 
+Since 1.3.1:
+
+* A new `id_ed25519` is created with mode `0600`. An existing one with group or
+  other permission bits is changed to `0600` at start; `0400` is left as it is.
+* A missing `id_ed25519.pub` is written from the private key, mode `0644`. One
+  that does not match the private key is logged as a warning and rewritten
+  from it: the server signs with the private key either way.
+* An `id_ed25519` that cannot be opened or read, or does not hold a valid key,
+  stops the server with an error. Before, an unreadable one made `hbbs` write a
+  new `id_ed25519.pub` that did not match it.
+
 ---
 
 ## Docker image

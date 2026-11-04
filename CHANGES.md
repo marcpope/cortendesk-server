@@ -16,6 +16,34 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Key files: unreadable private key stops the server, stale `.pub` rewritten (2026-11-04)
+
+Issue #6. Reported upstream by @layer6org, rustdesk-server issue 678. Ported
+from upstream rustdesk-server commit 873230e, which came after this fork's base.
+
+- An `id_ed25519` that exists but cannot be opened or read, or does not hold a
+  valid key, stops `hbbs` (and `hbbr` with `-k -` or `-k _`) with an error.
+  Before, an unreadable one was treated as missing: a new random
+  `id_ed25519.pub` was written, the private key could not be, and clients
+  configured with the new `.pub` got "Key mismatch". A malformed key already
+  stopped the server; it now does so with an error instead of `exit(1)`.
+- A new private key is created with mode `0600`, never over an existing file.
+  An existing one with group or other permission bits is set to `0600`;
+  `0400` is kept.
+- A missing `id_ed25519.pub` is written from the private key, mode `0644`,
+  through a temporary file so it is never seen half written. One that does
+  not match the private key is logged as a warning and rewritten from it: the
+  server signs with the private key either way, and refusing to start would
+  turn a stale `.pub` into a restart loop on upgrade. Upstream refuses here.
+  Before, a stale `.pub` was left as it was, without a word.
+- Symlinked key paths are followed, at most 40 links.
+- `tempfile` moved from a test-only dependency to a dependency; `libc` added
+  for tests.
+- `docs/environment-variables.md`: the key file rules, under Keys and
+  encryption.
+- Tests in `src/common.rs`, from upstream, changed for the stale `.pub`, plus
+  unreadable and invalid private keys leaving both files untouched.
+
 ### hbbs: punch request log capped, peer IDs at most 253 bytes (2026-11-04)
 
 Issue #5. Ported from upstream rustdesk-server commit 5e37f45, which came after
