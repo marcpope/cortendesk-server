@@ -12,7 +12,7 @@ use hbb_common::{
     futures_util::{sink::SinkExt, stream::StreamExt},
     protobuf::Message as _,
     rendezvous_proto::*,
-    tcp::Encrypt,
+    tcp::{kx_version_for, Encrypt, KxTranscript, KX_PARAMS_DOMAIN},
     tokio::{self, net::TcpStream, time::sleep},
     tokio_util::codec::Framed,
 };
@@ -29,6 +29,7 @@ use std::{
 const PORT_SECURED: i32 = 31116;
 const PORT_PLAIN: i32 = 31126;
 const PORT_WS: i32 = 31136;
+const PORT_SECURED_V1: i32 = 31326;
 
 /// A running hbbs that is killed when the test ends, however it ends.
 struct Hbbs(Child);
@@ -97,8 +98,15 @@ async fn connect(port: i32) -> Framed<TcpStream, BytesCodec> {
 }
 
 /// Client half of the exchange: verify the server's signed throwaway key, mint
-/// a symmetric key for this connection, seal it back.
-fn client_reply(offer: &[u8], server_pk: &sign::PublicKey) -> (RendezvousMessage, secretbox::Key) {
+/// a symmetric key for this connection, seal it back, and make the client's
+/// cipher. `v1` is a RustDesk 1.5 client (key exchange version 1, which checks
+/// the signed parameters); otherwise a 1.4 client, which ignores them and
+/// answers version 0.
+fn client_reply(
+    offer: &[u8],
+    server_pk: &sign::PublicKey,
+    v1: bool,
+) -> (RendezvousMessage, Encrypt, u32) {
     let msg_in = RendezvousMessage::parse_from_bytes(offer).expect("offer parses");
     let ex = match msg_in.union {
         Some(rendezvous_message::Union::KeyExchange(ex)) => ex,
@@ -107,21 +115,50 @@ fn client_reply(offer: &[u8], server_pk: &sign::PublicKey) -> (RendezvousMessage
     assert_eq!(ex.keys.len(), 1, "the offer carries exactly one signed key");
 
     let their_pk_b = sign::verify(&ex.keys[0], server_pk).expect("offer is signed by the server");
-    let mut pk_ = [0u8; box_::PUBLICKEYBYTES];
-    pk_.copy_from_slice(&their_pk_b);
-    let their_pk_b = box_::PublicKey(pk_);
+    let mut pk = [0u8; box_::PUBLICKEYBYTES];
+    pk.copy_from_slice(&their_pk_b);
+    let mut advertised = 0;
+    if v1 {
+        // As the 1.5.0 client: bit 255 of the key means the parameters are
+        // signed, and they must then verify and match.
+        if pk[31] & 0x80 != 0 || !ex.signed_params.is_empty() {
+            let signed = sign::verify(&ex.signed_params, server_pk).expect("parameters are signed");
+            let params = KxParams::parse_from_bytes(signed.strip_prefix(KX_PARAMS_DOMAIN).unwrap())
+                .expect("parameters parse");
+            assert_eq!(&params.pk[..], &pk[..]);
+            assert_eq!(params.version, ex.version);
+        }
+        advertised = ex.version;
+    }
+    let picked = kx_version_for(advertised);
 
     let (our_pk_b, our_sk_b) = box_::gen_keypair();
     let key = secretbox::gen_key();
     let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-    let sealed = box_::seal(&key.0, &nonce, &their_pk_b, &our_sk_b);
+    let sealed = box_::seal(&key.0, &nonce, &box_::PublicKey(pk), &our_sk_b);
 
     let mut msg_out = RendezvousMessage::new();
     msg_out.set_key_exchange(KeyExchange {
         keys: vec![Vec::from(our_pk_b.0).into(), sealed.into()],
+        version: picked,
         ..Default::default()
     });
-    (msg_out, key)
+    let cipher = if picked == 0 {
+        Encrypt::new(key)
+    } else {
+        Encrypt::new_split(
+            key,
+            true,
+            &KxTranscript {
+                initiator_pk: &our_pk_b.0,
+                responder_pk: &pk,
+                advertised,
+                picked,
+            },
+        )
+        .expect("split keys")
+    };
+    (msg_out, cipher, picked)
 }
 
 /// What a client puts on the wire once it wants to reach a peer. `licence_key`
@@ -154,33 +191,47 @@ fn assert_id_not_exist(bytes: &[u8]) {
 
 /// A signed-in client: encrypt the channel, then punch. This is the case that
 /// fails against an unpatched server — the client waits for an offer that never
-/// arrives and gives up with "Failed to secure tcp".
+/// arrives and gives up with "Failed to secure tcp". A 1.4 client, version 0.
 #[tokio::test]
 async fn signed_in_client_secures_the_channel_and_gets_a_reply() {
+    secure_and_punch(PORT_SECURED, false).await;
+}
+
+/// The same for a RustDesk 1.5 client: key exchange version 1, one key per
+/// direction (issue #17).
+#[tokio::test]
+async fn signed_in_1_5_client_negotiates_version_1() {
+    secure_and_punch(PORT_SECURED_V1, true).await;
+}
+
+async fn secure_and_punch(port: i32, v1: bool) {
     let dir = tempfile::tempdir().expect("scratch dir");
-    let (_hbbs, server_pk, server_key) = start_hbbs(dir.path(), PORT_SECURED);
-    let (mut sink, mut stream) = connect(PORT_SECURED).await.split();
+    let (_hbbs, server_pk, server_key) = start_hbbs(dir.path(), port);
+    let (mut sink, mut stream) = connect(port).await.split();
 
     let offer = stream.next().await.expect("offer sent").expect("offer read");
-    let (reply, key) = client_reply(&offer, &server_pk);
+    let (reply, mut cipher, picked) = client_reply(&offer, &server_pk, v1);
+    assert_eq!(picked, if v1 { 1 } else { 0 });
     sink.send(Bytes::from(reply.write_to_bytes().unwrap()))
         .await
         .expect("reply sent");
-    let mut cipher = Encrypt::new(key);
 
-    // Everything from here is encrypted, in both directions.
-    let request = punch_hole_request("a-console-access-token", &server_key);
-    sink.send(Bytes::from(cipher.enc(&request.write_to_bytes().unwrap())))
-        .await
-        .expect("request sent");
+    // Everything from here is encrypted, in both directions, twice, so the
+    // counters are checked too.
+    for _ in 0..2 {
+        let request = punch_hole_request("a-console-access-token", &server_key);
+        sink.send(Bytes::from(cipher.enc(&request.write_to_bytes().unwrap())))
+            .await
+            .expect("request sent");
 
-    let mut bytes = stream
-        .next()
-        .await
-        .expect("response sent")
-        .expect("response read");
-    cipher.dec(&mut bytes).expect("response decrypts");
-    assert_id_not_exist(&bytes);
+        let mut bytes = stream
+            .next()
+            .await
+            .expect("response sent")
+            .expect("response read");
+        cipher.dec(&mut bytes).expect("response decrypts");
+        assert_id_not_exist(&bytes);
+    }
 }
 
 /// A signed-out client never answers the offer. It must still be served, in

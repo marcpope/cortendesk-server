@@ -14,7 +14,8 @@
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
 // self-test survives failed sends; configurable per-IP registration limits; a
 // failed UDP reply no longer rebuilds the UDP socket; the `release-id` admin
-// command; idle cache entries are pruned. See CHANGES.md.
+// command; idle cache entries are pruned; key exchange version 1. See
+// CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -41,7 +42,7 @@ use hbb_common::{
         register_pk_response::Result::{TOO_FREQUENT, UUID_MISMATCH},
         *,
     },
-    tcp::{Encrypt, FramedStream},
+    tcp::{Encrypt, FramedStream, KxTranscript, KX_PARAMS_DOMAIN, KX_VERSION_LATEST},
     timeout,
     tokio::{
         self,
@@ -282,6 +283,65 @@ pub struct RendezvousServer {
     relay_servers0: Arc<RelayServers>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
+}
+
+/// Our half of a signalling key exchange, kept until the client answers.
+///
+/// Version 1 (RustDesk 1.5): beside the signed key, the server signs
+/// `KxParams` (that key and the newest version it speaks) and sets bit 255 of
+/// the key. X25519 ignores that bit, so older clients use the key as before
+/// and answer version 0; a 1.5 client sees it and then requires the signed
+/// parameters, so the version cannot be stripped on the way.
+struct KxOffer {
+    sk: box_::SecretKey,
+    /// Our public key as signed, marker bit included: part of the transcript.
+    pk: [u8; box_::PUBLICKEYBYTES],
+}
+
+impl KxOffer {
+    fn new(server_sk: &sign::SecretKey) -> (KeyExchange, Self) {
+        let (pk, sk) = box_::gen_keypair();
+        let mut pk = pk.0;
+        pk[box_::PUBLICKEYBYTES - 1] |= 0x80;
+        let params = KxParams {
+            pk: pk.to_vec().into(),
+            version: KX_VERSION_LATEST,
+            ..Default::default()
+        };
+        let mut signed = KX_PARAMS_DOMAIN.to_vec();
+        signed.extend_from_slice(&params.write_to_bytes().unwrap_or_default());
+        let ex = KeyExchange {
+            keys: vec![sign::sign(&pk, server_sk).into()],
+            version: KX_VERSION_LATEST,
+            signed_params: sign::sign(&signed, server_sk).into(),
+            ..Default::default()
+        };
+        (ex, Self { sk, pk })
+    }
+
+    /// The cipher for the client's answer: theirs is the initiator side.
+    fn accept(&self, reply: &KeyExchange) -> ResultType<Encrypt> {
+        if reply.keys.len() != 2 {
+            bail!("Handshake failed: expected 2 keys, got {}", reply.keys.len());
+        }
+        if reply.version > KX_VERSION_LATEST {
+            bail!("Handshake failed: unsupported key exchange version {}", reply.version);
+        }
+        let key = Encrypt::decode(&reply.keys[1], &reply.keys[0], &self.sk)?;
+        if reply.version == 0 {
+            return Ok(Encrypt::new(key));
+        }
+        Encrypt::new_split(
+            key,
+            false,
+            &KxTranscript {
+                initiator_pk: &reply.keys[0],
+                responder_pk: &self.pk,
+                advertised: KX_VERSION_LATEST,
+                picked: reply.version,
+            },
+        )
+    }
 }
 
 enum LoopFailure {
@@ -1853,9 +1913,11 @@ impl RendezvousServer {
                             dec.dec(&mut bytes)?;
                         } else if let Some(secret) = exchange_sk.as_ref() {
                             match Self::key_exchange_accept(&bytes, secret) {
-                                Some(Ok(key)) => {
-                                    decrypt = Some(Encrypt::new(key.clone()));
-                                    if let Sink::TcpStream(sink) = &mut writer { sink.encrypt = Some(Encrypt::new(key)); }
+                                Some(Ok(cipher)) => {
+                                    // One copy decrypts, the other encrypts: each
+                                    // advances only its own direction's counter.
+                                    decrypt = Some(cipher.clone());
+                                    if let Sink::TcpStream(sink) = &mut writer { sink.encrypt = Some(cipher); }
                                     connection.set_secure();
                                     exchange_sk = None;
                                     continue;
@@ -1962,40 +2024,27 @@ impl RendezvousServer {
     async fn key_exchange_offer(
         sk: Option<&sign::SecretKey>,
         sink: &mut TcpSink,
-    ) -> Option<box_::SecretKey> {
-        let sk = sk?;
-        let (our_pk_b, our_sk_b) = box_::gen_keypair();
+    ) -> Option<KxOffer> {
+        let (ex, offer) = KxOffer::new(sk?);
         let mut msg_out = RendezvousMessage::new();
-        msg_out.set_key_exchange(KeyExchange {
-            keys: vec![sign::sign(&our_pk_b.0, sk).into()],
-            ..Default::default()
-        });
+        msg_out.set_key_exchange(ex);
         let bytes = msg_out.write_to_bytes().ok()?;
         sink.sink.send(Bytes::from(bytes)).await.ok()?;
-        Some(our_sk_b)
+        Some(offer)
     }
 
     /// Server half of the signalling handshake, step 2: unseal the symmetric
-    /// key the client generated for the rest of this connection.
+    /// key the client generated for the rest of this connection, and make the
+    /// cipher for the version it picked: version 0 uses that key both ways,
+    /// version 1 one key per direction bound to the exchange (issue #17).
     ///
     /// `None` means the frame was not a key exchange at all and belongs to the
     /// normal message path; `Some(Err(..))` means it was one and was bad, which
     /// is fatal for the connection.
-    fn key_exchange_accept(
-        bytes: &[u8],
-        our_sk_b: &box_::SecretKey,
-    ) -> Option<ResultType<secretbox::Key>> {
+    fn key_exchange_accept(bytes: &[u8], offer: &KxOffer) -> Option<ResultType<Encrypt>> {
         let msg_in = RendezvousMessage::parse_from_bytes(bytes).ok()?;
         match msg_in.union {
-            Some(rendezvous_message::Union::KeyExchange(ex)) => {
-                if ex.keys.len() != 2 {
-                    return Some(Err(anyhow!(
-                        "Handshake failed: expected 2 keys, got {}",
-                        ex.keys.len()
-                    )));
-                }
-                Some(Encrypt::decode(&ex.keys[1], &ex.keys[0], our_sk_b))
-            }
+            Some(rendezvous_message::Union::KeyExchange(ex)) => Some(offer.accept(&ex)),
             _ => None,
         }
     }
@@ -2272,24 +2321,40 @@ mod key_exchange_tests {
     //! Wire-level tests for the signalling handshake.
     //!
     //! The client half here is written to the same algorithm the RustDesk
-    //! client uses, so these tests are a compatibility check and not just a
-    //! round trip against ourselves: if either side of the exchange drifts,
-    //! real clients stop connecting and these tests stop passing together.
+    //! client uses (1.4 for version 0, 1.5 for version 1), so these tests are a
+    //! compatibility check and not just a round trip against ourselves: if
+    //! either side of the exchange drifts, real clients stop connecting and
+    //! these tests stop passing together.
 
     use super::*;
     use hbb_common::tokio::net::TcpListener as TokioTcpListener;
 
+    /// Which client answers the offer.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Client {
+        /// Before 1.5: ignores `version` and `signed_params`, answers version 0.
+        Legacy,
+        /// 1.5: checks the signed parameters when the key's bit 255 asks for
+        /// them, and picks the highest version both speak.
+        V1,
+    }
+
+    fn offer_of(offer: &[u8]) -> ResultType<KeyExchange> {
+        match RendezvousMessage::parse_from_bytes(offer)?.union {
+            Some(rendezvous_message::Union::KeyExchange(ex)) => Ok(ex),
+            _ => bail!("not a key exchange"),
+        }
+    }
+
     /// The client half of step 2: verify the server's signed public key, mint a
-    /// symmetric key for the connection, and seal it to the server.
+    /// symmetric key for the connection, seal it to the server, and make the
+    /// client's cipher for the version it picked.
     fn client_reply(
         offer: &[u8],
         server_pk: &sign::PublicKey,
-    ) -> ResultType<(RendezvousMessage, secretbox::Key)> {
-        let msg_in = RendezvousMessage::parse_from_bytes(offer)?;
-        let ex = match msg_in.union {
-            Some(rendezvous_message::Union::KeyExchange(ex)) => ex,
-            _ => bail!("not a key exchange"),
-        };
+        client: Client,
+    ) -> ResultType<(RendezvousMessage, Encrypt)> {
+        let ex = offer_of(offer)?;
         if ex.keys.len() != 1 {
             bail!("expected 1 key, got {}", ex.keys.len());
         }
@@ -2298,26 +2363,61 @@ mod key_exchange_tests {
         if their_pk_b.len() != box_::PUBLICKEYBYTES {
             bail!("wrong public key length");
         }
-        let mut pk_ = [0u8; box_::PUBLICKEYBYTES];
-        pk_.copy_from_slice(&their_pk_b);
-        let their_pk_b = box_::PublicKey(pk_);
+        let mut pk = [0u8; box_::PUBLICKEYBYTES];
+        pk.copy_from_slice(&their_pk_b);
+        let mut advertised = 0;
+        if client == Client::V1 {
+            if pk[box_::PUBLICKEYBYTES - 1] & 0x80 != 0 || !ex.signed_params.is_empty() {
+                let params = sign::verify(&ex.signed_params, server_pk)
+                    .ok()
+                    .and_then(|p| KxParams::parse_from_bytes(p.strip_prefix(KX_PARAMS_DOMAIN)?).ok())
+                    .ok_or_else(|| anyhow!("missing or invalid signed key exchange parameters"))?;
+                if params.pk[..] != pk[..] || params.version != ex.version {
+                    bail!("version or key does not match its signature");
+                }
+            }
+            advertised = ex.version;
+        }
+        let picked = hbb_common::tcp::kx_version_for(advertised);
 
         let (our_pk_b, our_sk_b) = box_::gen_keypair();
         let key = secretbox::gen_key();
         let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-        let sealed = box_::seal(&key.0, &nonce, &their_pk_b, &our_sk_b);
+        let sealed = box_::seal(&key.0, &nonce, &box_::PublicKey(pk), &our_sk_b);
 
         let mut msg_out = RendezvousMessage::new();
         msg_out.set_key_exchange(KeyExchange {
             keys: vec![Vec::from(our_pk_b.0).into(), sealed.into()],
+            version: picked,
             ..Default::default()
         });
-        Ok((msg_out, key))
+        let cipher = if picked == 0 {
+            Encrypt::new(key)
+        } else {
+            Encrypt::new_split(
+                key,
+                true,
+                &KxTranscript {
+                    initiator_pk: &our_pk_b.0,
+                    responder_pk: &pk,
+                    advertised,
+                    picked,
+                },
+            )?
+        };
+        Ok((msg_out, cipher))
     }
 
-    /// Full handshake over a real socket, then an encrypted message each way.
+    /// Full handshake over a real socket, then an encrypted message each way,
+    /// for an older client (version 0) and a 1.5 client (version 1).
     #[tokio::test]
     async fn secures_a_connection_and_both_directions_decrypt() {
+        for client in [Client::Legacy, Client::V1] {
+            secures_with(client).await;
+        }
+    }
+
+    async fn secures_with(client: Client) {
         let (server_pk, server_sk) = sign::gen_keypair();
         let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2329,16 +2429,16 @@ mod key_exchange_tests {
                 sink: a,
                 encrypt: None,
             };
-            let our_sk_b = RendezvousServer::key_exchange_offer(Some(&server_sk), &mut sink)
+            let offer = RendezvousServer::key_exchange_offer(Some(&server_sk), &mut sink)
                 .await
                 .expect("offer sent");
 
             let mut bytes = b.next().await.unwrap().unwrap();
-            let key = RendezvousServer::key_exchange_accept(&bytes, &our_sk_b)
+            let cipher = RendezvousServer::key_exchange_accept(&bytes, &offer)
                 .expect("frame was a key exchange")
                 .expect("key exchange accepted");
-            let mut decrypt = Encrypt::new(key.clone());
-            sink.encrypt = Some(Encrypt::new(key));
+            let mut decrypt = cipher.clone();
+            sink.encrypt = Some(cipher);
 
             // Server -> client, encrypted.
             let mut msg_out = RendezvousMessage::new();
@@ -2347,33 +2447,39 @@ mod key_exchange_tests {
                 ..Default::default()
             });
             let mut wrapped = Some(Sink::TcpStream(sink));
+            RendezvousServer::send_to_sink(&mut wrapped, msg_out.clone()).await;
             RendezvousServer::send_to_sink(&mut wrapped, msg_out).await;
 
-            // Client -> server, encrypted.
-            bytes = b.next().await.unwrap().unwrap();
-            decrypt.dec(&mut bytes).expect("decrypts client traffic");
-            let msg_in = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
-            match msg_in.union {
-                Some(rendezvous_message::Union::RegisterPeer(rp)) => rp.id,
-                _ => panic!("unexpected message after handshake"),
+            // Client -> server, encrypted, twice: counters stay in step.
+            let mut ids = Vec::new();
+            for _ in 0..2 {
+                bytes = b.next().await.unwrap().unwrap();
+                decrypt.dec(&mut bytes).expect("decrypts client traffic");
+                match RendezvousMessage::parse_from_bytes(&bytes).unwrap().union {
+                    Some(rendezvous_message::Union::RegisterPeer(rp)) => ids.push(rp.id),
+                    _ => panic!("unexpected message after handshake"),
+                }
             }
+            ids
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let (mut a, mut b) = Framed::new(stream, BytesCodec::new()).split();
         let offer = b.next().await.unwrap().unwrap();
-        let (reply, key) = client_reply(&offer, &server_pk).expect("offer accepted by client");
+        let (reply, mut cipher) =
+            client_reply(&offer, &server_pk, client).expect("offer accepted by client");
+        assert_eq!(reply.key_exchange().version, if client == Client::V1 { 1 } else { 0 });
         a.send(Bytes::from(reply.write_to_bytes().unwrap()))
             .await
             .unwrap();
-        let mut cipher = Encrypt::new(key);
 
-        let mut bytes = b.next().await.unwrap().unwrap();
-        cipher.dec(&mut bytes).expect("decrypts server traffic");
-        let msg_in = RendezvousMessage::parse_from_bytes(&bytes).unwrap();
-        match msg_in.union {
-            Some(rendezvous_message::Union::TestNatResponse(r)) => assert_eq!(r.port, 4242),
-            _ => panic!("unexpected message from server"),
+        for _ in 0..2 {
+            let mut bytes = b.next().await.unwrap().unwrap();
+            cipher.dec(&mut bytes).expect("decrypts server traffic");
+            match RendezvousMessage::parse_from_bytes(&bytes).unwrap().union {
+                Some(rendezvous_message::Union::TestNatResponse(r)) => assert_eq!(r.port, 4242),
+                _ => panic!("unexpected message from server"),
+            }
         }
 
         let mut msg_out = RendezvousMessage::new();
@@ -2381,11 +2487,47 @@ mod key_exchange_tests {
             id: "handshake-test".to_owned(),
             ..Default::default()
         });
-        a.send(Bytes::from(cipher.enc(&msg_out.write_to_bytes().unwrap())))
-            .await
-            .unwrap();
+        for _ in 0..2 {
+            a.send(Bytes::from(cipher.enc(&msg_out.write_to_bytes().unwrap())))
+                .await
+                .unwrap();
+        }
 
-        assert_eq!(server.await.unwrap(), "handshake-test");
+        assert_eq!(server.await.unwrap(), vec!["handshake-test"; 2], "{client:?}");
+    }
+
+    /// The offer advertises version 1, marks its key and signs both.
+    #[test]
+    fn the_offer_is_marked_and_signed_for_version_1() {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (ex, offer) = KxOffer::new(&server_sk);
+        assert_eq!(ex.version, KX_VERSION_LATEST);
+        let pk = sign::verify(&ex.keys[0], &server_pk).unwrap();
+        assert_eq!(&pk[..], &offer.pk[..]);
+        assert_ne!(pk[box_::PUBLICKEYBYTES - 1] & 0x80, 0);
+        let params = sign::verify(&ex.signed_params, &server_pk).unwrap();
+        let params = KxParams::parse_from_bytes(params.strip_prefix(KX_PARAMS_DOMAIN).unwrap()).unwrap();
+        assert_eq!((&params.pk[..], params.version), (&pk[..], KX_VERSION_LATEST));
+    }
+
+    /// Version 1 seals the same thing differently in each direction, and a
+    /// 1.5 client refuses an offer whose version was stripped.
+    #[test]
+    fn version_1_keys_differ_per_direction_and_resist_stripping() {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let mut msg = RendezvousMessage::new();
+        let (ex, offer) = KxOffer::new(&server_sk);
+        msg.set_key_exchange(ex.clone());
+        let (reply, mut client) =
+            client_reply(&msg.write_to_bytes().unwrap(), &server_pk, Client::V1).unwrap();
+        let mut server = offer.accept(reply.key_exchange()).unwrap();
+        assert_ne!(client.enc(b"x"), server.enc(b"x"));
+
+        let mut stripped = ex;
+        stripped.version = 0;
+        stripped.signed_params = Default::default();
+        msg.set_key_exchange(stripped);
+        assert!(client_reply(&msg.write_to_bytes().unwrap(), &server_pk, Client::V1).is_err());
     }
 
     /// A server with no key pair must not offer: the signature is the only
@@ -2421,54 +2563,55 @@ mod key_exchange_tests {
     /// rather than being torn down.
     #[test]
     fn plain_client_traffic_is_not_mistaken_for_a_handshake() {
-        let (_, our_sk_b) = box_::gen_keypair();
+        let (_, offer) = KxOffer::new(&sign::gen_keypair().1);
         let mut msg = RendezvousMessage::new();
         msg.set_punch_hole_request(PunchHoleRequest {
             id: "123456789".to_owned(),
             ..Default::default()
         });
         let bytes = msg.write_to_bytes().unwrap();
-        assert!(RendezvousServer::key_exchange_accept(&bytes, &our_sk_b).is_none());
+        assert!(RendezvousServer::key_exchange_accept(&bytes, &offer).is_none());
         // Garbage is not a handshake either.
-        assert!(RendezvousServer::key_exchange_accept(b"\x01\x02\x03", &our_sk_b).is_none());
+        assert!(RendezvousServer::key_exchange_accept(b"\x01\x02\x03", &offer).is_none());
     }
 
-    /// A malformed or undecryptable exchange is fatal for that connection —
-    /// silently continuing in plain text would let anyone strip the encryption.
+    /// A malformed or undecryptable exchange, or one for a version we do not
+    /// speak, is fatal for that connection — silently continuing in plain
+    /// text would let anyone strip the encryption.
     #[test]
     fn a_bad_exchange_is_an_error_not_a_fallback() {
-        let (_, our_sk_b) = box_::gen_keypair();
-
-        let mut msg = RendezvousMessage::new();
-        msg.set_key_exchange(KeyExchange {
+        let (server_pk, server_sk) = sign::gen_keypair();
+        let (ex, offer) = KxOffer::new(&server_sk);
+        let bad = |ex: KeyExchange| {
+            let mut msg = RendezvousMessage::new();
+            msg.set_key_exchange(ex);
+            RendezvousServer::key_exchange_accept(&msg.write_to_bytes().unwrap(), &offer)
+                .expect("recognised as a key exchange")
+                .is_err()
+        };
+        assert!(bad(KeyExchange {
             keys: vec![vec![0u8; box_::PUBLICKEYBYTES].into()],
             ..Default::default()
-        });
-        let bytes = msg.write_to_bytes().unwrap();
-        assert!(RendezvousServer::key_exchange_accept(&bytes, &our_sk_b)
-            .expect("recognised as a key exchange")
-            .is_err());
+        }));
 
         // Right shape, sealed to somebody else's key.
-        let (other_pk_b, other_sk_b) = box_::gen_keypair();
+        let (other_pk_b, _) = box_::gen_keypair();
         let (client_pk_b, client_sk_b) = box_::gen_keypair();
         let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-        let sealed = box_::seal(
-            &secretbox::gen_key().0,
-            &nonce,
-            &other_pk_b,
-            &client_sk_b,
-        );
-        let _ = other_sk_b;
-        let mut msg = RendezvousMessage::new();
-        msg.set_key_exchange(KeyExchange {
+        let sealed = box_::seal(&secretbox::gen_key().0, &nonce, &other_pk_b, &client_sk_b);
+        assert!(bad(KeyExchange {
             keys: vec![Vec::from(client_pk_b.0).into(), sealed.into()],
             ..Default::default()
-        });
-        let bytes = msg.write_to_bytes().unwrap();
-        assert!(RendezvousServer::key_exchange_accept(&bytes, &our_sk_b)
-            .expect("recognised as a key exchange")
-            .is_err());
+        }));
+
+        // A good reply, but for a version past ours.
+        let mut msg = RendezvousMessage::new();
+        msg.set_key_exchange(ex);
+        let (reply, _) =
+            client_reply(&msg.write_to_bytes().unwrap(), &server_pk, Client::V1).unwrap();
+        let mut newer = reply.key_exchange().clone();
+        newer.version = KX_VERSION_LATEST + 1;
+        assert!(bad(newer));
     }
 }
 

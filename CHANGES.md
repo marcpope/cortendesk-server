@@ -16,6 +16,32 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: signalling key exchange version 1 (2026-11-04)
+
+Issue #17. Requested upstream by @Silvarion, rustdesk-server issue 709; based
+on the implementation proposed upstream by @NotOfficer, rustdesk-server
+PR 734. Matches the client side in RustDesk 1.5.0 and `hbb_common`'s
+`KxTranscript` / `Encrypt::new_split`.
+
+- The offer on each plain-TCP connection now advertises version 1: beside
+  the signed throwaway key it carries `version = 1` and `signed_params`, the
+  server's signature over `KxParams` (that key and the version), and bit 255
+  of the key is set. X25519 ignores that bit, so clients before 1.5 use the
+  key as before, ignore the new fields and answer version 0, which is served
+  as before: one key for both directions.
+- A 1.5 client sees the bit, requires the signed parameters, and answers
+  version 1. Both sides then split the exchanged key into one key per
+  direction, derived from a transcript of the exchange (both public keys and
+  both versions). A man in the middle cannot strip the version without the
+  client noticing, and a version past 1 is refused.
+- Nothing else changes: the offer is still sent at once, only on plain TCP,
+  only with a server key pair, and a client that sends plain text first
+  stays in plain text.
+- Tests: the unit tests in `src/rendezvous_server.rs` run the handshake as a
+  1.4 and as a 1.5 client, check the marker and signatures, a stripped
+  offer, per-direction keys and an unknown version;
+  `tests/signalling_handshake.rs` adds a 1.5 client against a real `hbbs`.
+
 ### sqlx 0.8, without database TLS (2026-11-04)
 
 Issue #14. Based on a change proposed upstream by @jahvari, rustdesk-server
