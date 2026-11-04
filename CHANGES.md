@@ -16,6 +16,65 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.4.0 (unreleased)
 
+### hbbs: UDP hole punching and IPv6 peer-to-peer for RustDesk 1.5 (2026-11-04)
+
+Issue #18. Built on this fork's design; the implementation proposed upstream
+by @NotOfficer, rustdesk-server PR 734, was used as a reference only.
+
+Design. A *punch route* records one controller connection whose request was
+granted a UDP port or had its IPv6 address sent to the device. It is keyed by
+that connection's address, holds the device ID and the address the device
+registered from, lives 30 seconds or until the connection closes, and is the
+only thing that lets a reply carry a UDP or IPv6 address back. One UDP reply
+to an address taken from a packet is added, the NAT test answer, and it is
+rate-limited; nothing else new sends UDP. The policy check, licence key,
+WebSocket handling and `cd1/` tags are unchanged and come first. New
+`src/punch.rs`.
+
+- UDP `TestNatRequest` on the main port is answered with
+  `TestNatResponse { port }` only, never a `ConfigUpdate`: a few bytes for a
+  three-byte request. At most 60 in a burst and 30 a second per source IP
+  (IPv6: per /64), and 2000 a second in all; the table of sources holds at
+  most 65,536 and refuses new ones when full. The 1.5 controller learns its
+  public UDP port from it. Before, UDP `TestNatRequest` was ignored, so 1.5
+  controllers always sent `udp_port = 0`.
+- A `PunchHoleRequest` passes `udp_port` and `socket_addr_v6` on to the device
+  (`PunchHole`; `FetchLocalAddr` gets only the IPv6 address) when: the
+  controller reports 1.5.0 or newer, did not set `force_relay`, nothing forces
+  the relay (WebSocket on either side, `ALWAYS_USE_RELAY`, LAN/WAN mismatch),
+  and the device is not known to run an older client. The IPv6 address must
+  be global unicast (2000::/3) with a port, and at most 60 in a burst, then
+  one a second, go out per controller IP and per target /64 (a target in the
+  controller's own /64 counts only for the controller). Older controllers send
+  these fields too, but their UDP and IPv6 attempts hold up the relay fallback
+  for up to 20 seconds, so they get a TCP punch as before.
+- A UDP `PunchHoleSent` (the device's answer to a UDP punch, sent from the
+  socket it will punch with) is taken only for an open route that granted
+  UDP, naming that route's device, from that device's registered host (IPv4:
+  same address; IPv6: same /64), once. The controller then gets a
+  `PunchHoleResponse` with `is_udp` and the datagram's source address, over
+  its TCP connection. Anything else is dropped and leaves the route waiting.
+  It never causes a UDP packet. Before, every UDP `PunchHoleSent` was ignored.
+- The device's own IPv6 address, in `PunchHoleSent`, `LocalAddr` or
+  `RelayResponse`, goes back to the controller only on a route that sent the
+  controller's address, from the device's registered host, never over
+  WebSocket, global unicast with a port, within the per-/64 limit. Before,
+  `RelayResponse.socket_addr_v6` was passed on unchecked.
+- A device that answers with a version before 1.5, from its registered host,
+  is remembered (at most 100,000, for 7 days) and gets no UDP port or IPv6
+  address: it would punch with probes a 1.5 controller does not answer.
+- Routes: at most 10,000, and 64 per controller IP.
+- `UDP_PUNCH=N` and `IPV6_PUNCH=N` turn either off. Both are logged at start.
+- Not done: WebRTC answers in a UDP `PunchHoleSent` are passed on like those
+  over TCP (length-checked), but not tied to the WebRTC route, as before.
+- README (Configuration) and `docs/environment-variables.md`.
+- Tests: unit tests in `src/punch.rs` (address checks, every limit, route
+  matching, the older-client record); `tests/udp_punch.rs` against a real
+  `hbbs`: the NAT test and its limit, the whole UDP punch with IPv6 both ways,
+  a forged and a repeated answer, IPv6 only on a route and only global,
+  older controllers, `force_relay`, a device that answers as 1.4.9,
+  `ALWAYS_USE_RELAY`, and an unrequested UDP answer.
+
 ### CodeQL: skip hbb_common; device uuids no longer logged (2026-11-04)
 
 - New `.github/codeql/codeql-config.yml`, used by

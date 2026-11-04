@@ -15,13 +15,15 @@
 // self-test survives failed sends; configurable per-IP registration limits; a
 // failed UDP reply no longer rebuilds the UDP socket; the `release-id` admin
 // command; idle cache entries are pruned; key exchange version 1; device
-// uuids are not logged. See CHANGES.md.
+// uuids are not logged; UDP hole punching and IPv6 peer-to-peer
+// (`crate::punch`). See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
 use crate::common::*;
 use crate::peer::*;
 use crate::policy;
+use crate::punch::{self, Punches};
 use crate::webrtc_signal::{self, Routes};
 use crate::stream_connection::{
     Connection, Registration, HEARTBEAT_INTERVAL, HEARTBEAT_SECONDS, RECEIVE_TIMEOUT, WRITE_TIMEOUT,
@@ -57,7 +59,7 @@ use hbb_common::{
     AddrMangle, ResultType,
 };
 use ipnetwork::Ipv4Network;
-use sodiumoxide::crypto::{box_, secretbox, sign};
+use sodiumoxide::crypto::{box_, sign};
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -216,6 +218,18 @@ const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
 static PUNCH_REQ_MAX: Lazy<usize> =
     Lazy::new(|| get_arg("MAX_PUNCH_REQUESTS").parse().unwrap_or(100_000));
 
+/// `UDP_PUNCH` and `IPV6_PUNCH`: UDP hole punching and IPv6 peer-to-peer for
+/// RustDesk 1.5 (issue #18). On unless set to `N`, `no`, `0`, `false` or `off`.
+static UDP_PUNCH: Lazy<bool> = Lazy::new(|| switch_on("UDP_PUNCH"));
+static IPV6_PUNCH: Lazy<bool> = Lazy::new(|| switch_on("IPV6_PUNCH"));
+
+fn switch_on(name: &str) -> bool {
+    !matches!(
+        get_arg(name).trim().to_lowercase().as_str(),
+        "n" | "no" | "0" | "false" | "off"
+    )
+}
+
 /// Per-IP registration limits: `RegisterPk` requests in a row without a pause of
 /// `IP_BLOCK_DUR` seconds, and distinct IDs within `DAY_SECONDS`. Many machines
 /// behind one NAT may need more.
@@ -276,6 +290,8 @@ pub struct RendezvousServer {
     tcp_punch: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
     /// Controller connections in a WebRTC exchange; see `crate::webrtc_signal`.
     webrtc: Arc<Mutex<Routes<Connection>>>,
+    /// Controller connections granted UDP punching or IPv6; see `crate::punch`.
+    punches: Arc<std::sync::Mutex<Punches>>,
     registration_locks: RegistrationLocks,
     pm: PeerMap,
     tx: Sender,
@@ -393,6 +409,7 @@ impl RendezvousServer {
         let mut rs = Self {
             tcp_punch: Arc::new(Mutex::new(HashMap::new())),
             webrtc: Default::default(),
+            punches: Default::default(),
             registration_locks: Default::default(),
             pm,
             tx: tx.clone(),
@@ -439,6 +456,11 @@ impl RendezvousServer {
             "MAX_REGISTER_BURST_PER_IP={}, MAX_NEW_IDS_PER_IP={}",
             *MAX_REGISTER_BURST_PER_IP,
             *MAX_NEW_IDS_PER_IP
+        );
+        log::info!(
+            "UDP_PUNCH={}, IPV6_PUNCH={}",
+            if *UDP_PUNCH { "Y" } else { "N" },
+            if *IPV6_PUNCH { "Y" } else { "N" }
         );
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
@@ -657,7 +679,29 @@ impl RendezvousServer {
                     // The supported client path sends PunchHoleRequest over TCP/WS.
                 }
                 Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
-                    // UDP PunchHoleSent is intentionally unsupported to avoid UDP reflection/amplification
+                    // Only the device's answer to a UDP punch this server
+                    // asked for. It never causes a UDP packet: the answer
+                    // goes to the controller over its TCP connection.
+                    self.handle_udp_hole_sent(phs, addr).await;
+                }
+                Some(rendezvous_message::Union::TestNatRequest(_)) => {
+                    // The controller learns its public UDP port from this, as
+                    // from a STUN server. The one UDP reply to an address taken
+                    // from a packet: a few bytes, rate-limited (`crate::punch`).
+                    if *UDP_PUNCH
+                        && self
+                            .punches
+                            .lock()
+                            .unwrap()
+                            .nat_test_allowed(addr.ip(), Instant::now())
+                    {
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_test_nat_response(TestNatResponse {
+                            port: addr.port() as _,
+                            ..Default::default()
+                        });
+                        udp_send(socket, &msg_out, addr).await?;
+                    }
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
                     // UDP LocalAddr is intentionally unsupported to avoid UDP reflection/amplification
@@ -903,9 +947,16 @@ impl RendezvousServer {
                     if !rr.webrtc_sdp_answer.is_empty() {
                         log::info!("WebRTC answer with relay from {} to {}", rr.id(), addr_b);
                     }
-                    let id = rr.id();
+                    let id = rr.id().to_owned();
+                    rr.socket_addr_v6 = self.reply_v6(
+                        addr_b,
+                        &id,
+                        &rr.version,
+                        (!ws).then_some(peer_ip),
+                        &rr.socket_addr_v6,
+                    );
                     if !id.is_empty() {
-                        let pk = self.get_pk(&rr.version, id.to_owned()).await;
+                        let pk = self.get_pk(&rr.version, id).await;
                         rr.set_pk(pk);
                     }
                     let mut msg_out = RendezvousMessage::new();
@@ -921,7 +972,7 @@ impl RendezvousServer {
                     allow_err!(self.send_to_tcp_sync(msg_out, addr_b).await);
                 }
                 Some(rendezvous_message::Union::PunchHoleSent(phs)) => {
-                    allow_err!(self.handle_hole_sent(phs, addr, None).await);
+                    allow_err!(self.handle_hole_sent(phs, addr, (!ws).then_some(peer_ip)).await);
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
                     // `peer_ip` is the client address: the TCP peer, or on
@@ -929,7 +980,7 @@ impl RendezvousServer {
                     // names in X-Forwarded-For. Not `addr`, whose port on
                     // WebSocket is a correlation token, not the client's.
                     policy::note_local_addr(&la.id, AddrMangle::decode(&la.local_addr), peer_ip);
-                    allow_err!(self.handle_local_addr(la, addr, None).await);
+                    allow_err!(self.handle_local_addr(la, addr, (!ws).then_some(peer_ip)).await);
                 }
                 Some(rendezvous_message::Union::IceCandidate(ice)) => {
                     self.handle_ice_candidate(ice, addr).await;
@@ -1026,20 +1077,18 @@ impl RendezvousServer {
     }
 
     #[inline]
-    async fn handle_hole_sent<'a>(
+    /// `sender`: the device's address, `None` on WebSocket.
+    async fn handle_hole_sent(
         &mut self,
         phs: PunchHoleSent,
         addr: SocketAddr,
-        socket: Option<&'a mut FramedSocket>,
+        sender: Option<IpAddr>,
     ) -> ResultType<()> {
         // punch hole sent from B, tell A that B is ready to be connected
         let addr_a = AddrMangle::decode(&phs.socket_addr);
-        log::debug!(
-            "{} punch hole response to {:?} from {:?}",
-            if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
-        );
+        log::debug!("TCP punch hole response to {:?} from {:?}", &addr_a, &addr);
+        let socket_addr_v6 =
+            self.reply_v6(addr_a, &phs.id, &phs.version, sender, &phs.socket_addr_v6);
         if !phs.webrtc_sdp_answer.is_empty() {
             log::info!("WebRTC answer from {} to {}", phs.id, addr_a);
         }
@@ -1049,6 +1098,7 @@ impl RendezvousServer {
             pk: self.get_pk(&phs.version, phs.id).await,
             relay_server: phs.relay_server.clone(),
             webrtc_sdp_answer: Self::checked_answer(phs.webrtc_sdp_answer),
+            socket_addr_v6,
             ..Default::default()
         };
         if let Ok(t) = phs.nat_type.enum_value() {
@@ -1062,34 +1112,102 @@ impl RendezvousServer {
             .contains_key(&try_into_v4(addr_a))
         {
             self.send_to_tcp_sync(msg_out, addr_a).await?;
-        } else if let Some(socket) = socket {
-            udp_send(socket, &msg_out, addr_a).await?;
         } else {
             self.send_to_tcp(msg_out, addr_a).await;
         }
         Ok(())
     }
 
+    /// A UDP `PunchHoleSent`: the device's answer to a UDP punch, from the
+    /// socket it will punch with. Taken only for an open route that granted
+    /// UDP, naming that route's device, from that device's registered host,
+    /// once. The controller then gets the address the datagram came from.
+    async fn handle_udp_hole_sent(&mut self, phs: PunchHoleSent, addr: SocketAddr) {
+        if !*UDP_PUNCH {
+            return;
+        }
+        let addr_a = try_into_v4(AddrMangle::decode(&phs.socket_addr));
+        let now = Instant::now();
+        let Some(route) = self
+            .punches
+            .lock()
+            .unwrap()
+            .claim_udp(addr_a, &phs.id, addr.ip(), now)
+        else {
+            return;
+        };
+        log::debug!("UDP punch hole response to {:?} from {:?}", addr_a, addr);
+        let socket_addr_v6 = self.reply_v6(addr_a, &phs.id, &phs.version, Some(addr.ip()), &phs.socket_addr_v6);
+        let mut p = PunchHoleResponse {
+            socket_addr: AddrMangle::encode(try_into_v4(addr)).into(),
+            pk: self.get_pk(&phs.version, route.target).await,
+            relay_server: phs.relay_server,
+            is_udp: true,
+            socket_addr_v6,
+            webrtc_sdp_answer: Self::checked_answer(phs.webrtc_sdp_answer),
+            ..Default::default()
+        };
+        if let Ok(t) = phs.nat_type.enum_value() {
+            p.set_nat_type(t);
+        }
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_punch_hole_response(p);
+        allow_err!(self.send_to_tcp_sync(msg_out, addr_a).await);
+    }
+
+    /// The device's IPv6 address for the controller at `addr_a`, from a reply
+    /// of device `id` sent by `sender`: only when that controller's route had
+    /// its own IPv6 address go to `id`, the reply comes from the host `id`
+    /// registered from (never over WebSocket, whose address can come from a
+    /// header), and the address is global unicast with a port. Also notes
+    /// which version the device runs. Empty otherwise.
+    fn reply_v6(
+        &self,
+        addr_a: SocketAddr,
+        id: &str,
+        version: &str,
+        sender: Option<IpAddr>,
+        v6: &[u8],
+    ) -> Bytes {
+        let Some(sender) = sender else { return Bytes::new() };
+        let now = Instant::now();
+        let mut punches = self.punches.lock().unwrap();
+        let Some(route) = punches.get(try_into_v4(addr_a), now).cloned() else {
+            return Bytes::new();
+        };
+        if route.target != id || !punch::same_host(route.target_ip, sender) {
+            return Bytes::new();
+        }
+        punches.note_version(id, version, now);
+        if !route.v6 || v6.is_empty() || v6.len() > 18 {
+            return Bytes::new();
+        }
+        let addr = AddrMangle::decode(v6);
+        if !punch::usable_v6(addr) || !punches.v6_back_allowed(addr, now) {
+            return Bytes::new();
+        }
+        log::debug!("IPv6 address of {} back to {}", id, addr_a);
+        AddrMangle::encode(addr).into()
+    }
+
     #[inline]
-    async fn handle_local_addr<'a>(
+    /// `sender`: the device's address, `None` on WebSocket.
+    async fn handle_local_addr(
         &mut self,
         la: LocalAddr,
         addr: SocketAddr,
-        socket: Option<&'a mut FramedSocket>,
+        sender: Option<IpAddr>,
     ) -> ResultType<()> {
         // relay local addrs of B to A
         let addr_a = AddrMangle::decode(&la.socket_addr);
-        log::debug!(
-            "{} local addrs response to {:?} from {:?}",
-            if socket.is_none() { "TCP" } else { "UDP" },
-            &addr_a,
-            &addr
-        );
+        log::debug!("TCP local addrs response to {:?} from {:?}", &addr_a, &addr);
+        let socket_addr_v6 = self.reply_v6(addr_a, &la.id, &la.version, sender, &la.socket_addr_v6);
         let mut msg_out = RendezvousMessage::new();
         let mut p = PunchHoleResponse {
             socket_addr: la.local_addr.clone(),
             pk: self.get_pk(&la.version, la.id).await,
             relay_server: la.relay_server,
+            socket_addr_v6,
             ..Default::default()
         };
         p.set_is_local(true);
@@ -1101,8 +1219,6 @@ impl RendezvousServer {
             .contains_key(&try_into_v4(addr_a))
         {
             self.send_to_tcp_sync(msg_out, addr_a).await?;
-        } else if let Some(socket) = socket {
-            udp_send(socket, &msg_out, addr_a).await?;
         } else {
             self.send_to_tcp(msg_out, addr_a).await;
         }
@@ -1143,7 +1259,7 @@ impl RendezvousServer {
                 Self::punch_refusal(punch_hole_response::Failure::LICENSE_MISMATCH, reason);
             return Ok((refusal, None));
         }
-        let id = ph.id;
+        let id = std::mem::take(&mut ph.id);
         // punch hole request from A, relay to B,
         // check if in same intranet first,
         // fetch local addrs if in same intranet.
@@ -1189,6 +1305,11 @@ impl RendezvousServer {
                 }
                 ph.nat_type = NatType::SYMMETRIC.into(); // will force relay
             }
+            let relay_forced = ws
+                || peer_ws
+                || ALWAYS_USE_RELAY.load(Ordering::SeqCst)
+                || (peer_is_lan ^ is_lan)
+                || ph.force_relay;
             let same_intranet: bool = !ws
                 && !peer_ws
                 && (peer_is_lan && is_lan || {
@@ -1201,6 +1322,8 @@ impl RendezvousServer {
                     }
                 });
             let socket_addr = AddrMangle::encode(addr).into();
+            let (udp_port, socket_addr_v6) =
+                self.grant_punch(&ph, addr, peer_ip, &id, peer_addr, relay_forced, same_intranet);
             if same_intranet {
                 log::debug!(
                     "Fetch local addr {:?} {:?} request from {:?}",
@@ -1212,6 +1335,7 @@ impl RendezvousServer {
                     socket_addr,
                     relay_server,
                     controlled_context: Self::audit_context("lan"),
+                    socket_addr_v6,
                     ..Default::default()
                 });
             } else {
@@ -1242,6 +1366,8 @@ impl RendezvousServer {
                     relay_server,
                     controlled_context: Self::audit_context(path),
                     webrtc_sdp_offer,
+                    udp_port,
+                    socket_addr_v6,
                     ..Default::default()
                 });
             }
@@ -1254,6 +1380,69 @@ impl RendezvousServer {
             });
             Ok((msg_out, None))
         }
+    }
+
+    /// What a punch request may pass on to the device (issue #18): its
+    /// `udp_port` and its own IPv6 address. Only from a 1.5 or newer controller
+    /// that did not ask for a relay, to a device not known to run an older
+    /// client, when nothing forces the relay. An older controller's UDP and
+    /// IPv6 attempts hold up its relay fallback for up to 20 seconds, so it gets
+    /// a TCP punch as before. Opens the route the device's reply needs.
+    #[allow(clippy::too_many_arguments)]
+    fn grant_punch(
+        &self,
+        ph: &PunchHoleRequest,
+        addr: SocketAddr,
+        peer_ip: IpAddr,
+        id: &str,
+        peer_addr: SocketAddr,
+        relay_forced: bool,
+        same_intranet: bool,
+    ) -> (i32, Bytes) {
+        if relay_forced || !punch::is_1_5(&ph.version) {
+            return (0, Bytes::new());
+        }
+        let now = Instant::now();
+        let mut punches = self.punches.lock().unwrap();
+        if punches.is_old_client(id, now) {
+            return (0, Bytes::new());
+        }
+        // FetchLocalAddr has no UDP port: on a LAN the device connects locally.
+        let udp_port = if *UDP_PUNCH && !same_intranet && (1..=65535).contains(&ph.udp_port) {
+            ph.udp_port
+        } else {
+            0
+        };
+        let v6 = if *IPV6_PUNCH && (1..=18).contains(&ph.socket_addr_v6.len()) {
+            let v6 = AddrMangle::decode(&ph.socket_addr_v6);
+            (punch::usable_v6(v6) && punches.v6_allowed(peer_ip, v6, now)).then_some(v6)
+        } else {
+            None
+        };
+        if udp_port == 0 && v6.is_none() {
+            return (0, Bytes::new());
+        }
+        let opened = punches.open(
+            try_into_v4(addr),
+            punch::Route {
+                target: id.to_owned(),
+                target_ip: norm_ip(peer_addr.ip()),
+                udp: udp_port > 0,
+                v6: v6.is_some(),
+                created: now,
+            },
+        );
+        if !opened {
+            return (0, Bytes::new());
+        }
+        log::debug!(
+            "Punch route {} -> {}: udp {}, ipv6 {}",
+            addr,
+            id,
+            udp_port > 0,
+            v6.is_some()
+        );
+        (udp_port, v6.map(|v6| AddrMangle::encode(v6).into()).unwrap_or_default())
     }
 
     /// A punch hole refusal the client shows as text. `other_failure` is what
@@ -1982,6 +2171,7 @@ impl RendezvousServer {
         }
         {
             self.webrtc.lock().await.close(connection.addr);
+            self.punches.lock().unwrap().close(connection.addr);
         }
         writer.close().await;
         log::debug!(
@@ -2326,6 +2516,7 @@ mod key_exchange_tests {
 
     use super::*;
     use hbb_common::tokio::net::TcpListener as TokioTcpListener;
+    use sodiumoxide::crypto::secretbox;
 
     /// Which client answers the offer.
     #[derive(Clone, Copy, Debug, PartialEq)]

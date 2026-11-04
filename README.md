@@ -122,6 +122,12 @@ default), for example `printf 'release-id 123456789' | nc 127.0.0.1 21115`.
 See [Runtime console](docs/environment-variables.md#runtime-console) for the
 replies.
 
+UDP hole punching and IPv6 peer-to-peer (since 1.4.0): a RustDesk 1.5
+controller with `enable-udp-punch` or `enable-ipv6-punch` set to `Y` can
+connect directly over UDP or IPv6 instead of the relay. Both need UDP 21116
+reachable on `hbbs`. Off with `UDP_PUNCH=N` / `IPV6_PUNCH=N`. Older clients
+are served as before.
+
 Many machines behind one public IP: `hbbs` lets one IP register 300 distinct
 IDs a day and 30 registrations in a row, after which new machines from it stay
 offline ("ID does not exist"). Since 1.4.0 both are settings:
