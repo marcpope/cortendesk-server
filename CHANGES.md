@@ -16,6 +16,19 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Build script without hbb_common (2026-11-04)
+
+Issue #15. Based on a change proposed upstream by @luminoso, rustdesk-server
+PR 707.
+
+- `build.rs` writes `src/version.rs` from `CARGO_PKG_VERSION` itself, and only
+  when it changed. Before, it called `hbb_common::gen_version`, which made
+  `hbb_common`, and with it vendored OpenSSL, a build dependency: compiled a
+  second time for the build host, which slowed builds and complicated
+  cross-compiling.
+- `src/version.rs` no longer has `BUILD_DATE`, which nothing used.
+- `hbb_common` and `openssl` are no longer build dependencies.
+
 ### Unused dependencies removed (2026-11-04)
 
 Issue #13. Based on a change proposed upstream by @jahvari, rustdesk-server

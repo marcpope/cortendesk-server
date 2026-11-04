@@ -52,8 +52,7 @@ reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocki
 reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocking", "socks", "json", "rustls-tls", "rustls-tls-native-roots", "gzip"], default-features=false }
 
 # hbb_common pulls in native-tls (OpenSSL) on Linux. Build OpenSSL from source
-# so the static musl binaries need no system OpenSSL, on the target or on the
-# host that runs build.rs.
+# so the static musl binaries need no system OpenSSL.
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
 
@@ -61,12 +60,6 @@ openssl = { version = "0.10", features = ["vendored"] }
 # The stand-in console in tests/access_policy.rs.
 axum = "0.5"
 libc = "0.2"
-
-[build-dependencies]
-hbb_common = { path = "libs/hbb_common" }
-
-[target.'cfg(target_os = "linux")'.build-dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
 
 [workspace]
 members = ["libs/hbb_common"]
