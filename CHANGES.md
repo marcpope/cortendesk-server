@@ -16,6 +16,20 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Unused dependencies removed (2026-11-04)
+
+Issue #13. Based on a change proposed upstream by @jahvari, rustdesk-server
+PR 729.
+
+- Removed, as nothing in `src/` or `tests/` uses them: `bcrypt`,
+  `jsonwebtoken`, `tower-http`, `headers`, `http`, `regex`, `flate2`,
+  `whoami`, `machine-uid`, `mac_address`, `ping`, and `minreq`, which only the
+  removed update check used. `Cargo.lock` loses those and what only they
+  pulled in; nothing else changed version.
+- `axum` moved to a test-only dependency: only the stand-in console in
+  `tests/access_policy.rs` uses it.
+- `ring` 0.16 stays: `sqlx` 0.6 pulls it in through `rustls` 0.20.
+
 ### hbbs: per-IP registration limits are settings (2026-11-04)
 
 Issue #12. Based on a change proposed upstream by @devhem, rustdesk-server
