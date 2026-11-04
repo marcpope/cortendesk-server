@@ -111,6 +111,12 @@ servers take `-b` / `BIND` to listen on one local IPv4 or IPv6 address instead
 of all interfaces. Every option is in
 [docs/environment-variables.md](docs/environment-variables.md).
 
+Many machines behind one public IP: `hbbs` lets one IP register 300 distinct
+IDs a day and 30 registrations in a row, after which new machines from it stay
+offline ("ID does not exist"). Since 1.3.1 both are settings:
+`MAX_NEW_IDS_PER_IP` / `--max-new-ids-per-ip` and
+`MAX_REGISTER_BURST_PER_IP` / `--max-register-burst-per-ip`.
+
 ## Device policy from a CortenDesk console
 
 Since 1.1.0 `hbbs` can enforce the device policy set in a

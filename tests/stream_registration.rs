@@ -62,6 +62,9 @@ impl Server {
         Self::start_with_proxy("127.0.0.0/8,::1/128").await
     }
     async fn start_with_proxy(proxies: &str) -> Self {
+        Self::start_with(proxies, &[], &[]).await
+    }
+    async fn start_with(proxies: &str, args: &[&str], envs: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let port = free_port();
         let child = Command::new(env!("CARGO_BIN_EXE_hbbs"))
@@ -74,6 +77,8 @@ impl Server {
                 "--trusted-proxies",
                 proxies,
             ])
+            .args(args)
+            .envs(envs.iter().copied())
             .env_remove("TRUSTED_PROXIES")
             .env_remove("DB_URL")
             .env("TEST_HBBS", "no")
@@ -759,4 +764,41 @@ async fn signalling_messages_over_1_mib_are_refused() {
     })
     .await;
     assert!(closed.is_ok(), "oversized TCP frame");
+}
+
+/// The per-IP limits on new IDs and on registrations in a row are settings
+/// (issue #12): here 3 IDs, from the command line, and 6 registrations, from
+/// the environment.
+#[tokio::test]
+async fn per_ip_registration_limits_are_configurable() {
+    let server = Server::start_with(
+        "127.0.0.0/8,::1/128",
+        &["--max-new-ids-per-ip", "3"],
+        &[("MAX_REGISTER_BURST_PER_IP", "6")],
+    )
+    .await;
+    let result = |msg: RendezvousMessage| msg.register_pk_response().result.enum_value();
+    // One connection per registration, as a device holds one per ID.
+    let mut held = Vec::new();
+    for id in ["123456731", "123456732", "123456733"] {
+        let mut ws = server.ws().await;
+        register(&mut ws, id).await;
+        held.push(ws);
+    }
+    // A fourth new ID from the same IP is refused...
+    let mut ws = server.ws().await;
+    send(&mut ws, registration("123456734", b"123456734")).await;
+    assert_eq!(result(recv(&mut ws).await), Ok(register_pk_response::Result::TOO_FREQUENT));
+    // ...while known IDs still register, up to 6 registrations in a row.
+    for id in ["123456731", "123456732"] {
+        let mut ws = server.ws().await;
+        register(&mut ws, id).await;
+        held.push(ws);
+    }
+    let mut ws = server.ws().await;
+    send(&mut ws, registration("123456733", b"123456733")).await;
+    assert_eq!(result(recv(&mut ws).await), Ok(register_pk_response::Result::TOO_FREQUENT));
+    // Another IP has its own count.
+    let mut other = server.ws_ip("203.0.113.56").await;
+    register(&mut other, "123456734").await;
 }

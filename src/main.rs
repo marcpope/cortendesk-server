@@ -24,6 +24,8 @@ fn main() -> ResultType<()> {
         -M, --rmem=[NUMBER(default={RMEM})] 'Sets UDP recv buffer size, set system rmem_max first, e.g., sudo sysctl -w net.core.rmem_max=52428800. vi /etc/sysctl.conf, net.core.rmem_max=52428800, sudo sysctl –p'
         , --mask=[MASK] '[DEPRECATED] Determine if the connection comes from LAN, e.g. 192.168.0.0/16'
         , --trusted-proxies=[CIDRS] 'Comma-separated CIDRs of reverse proxies whose X-Forwarded-For is used (default: none)'
+        , --max-new-ids-per-ip=[NUMBER(default=300)] 'Sets how many distinct IDs may register from one IP in 24 hours'
+        , --max-register-burst-per-ip=[NUMBER(default=30)] 'Sets how many registrations one IP may send without a 60-second pause'
         -k, --key=[KEY] 'Only allow the client with the same key'",
     );
     init_args(

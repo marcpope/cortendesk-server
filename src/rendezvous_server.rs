@@ -12,7 +12,8 @@
 // `always-use-relay` leaves the relay list alone; the punch request log is
 // capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
-// self-test survives failed sends. See CHANGES.md.
+// self-test survives failed sends; configurable per-IP registration limits.
+// See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -213,6 +214,30 @@ const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
 static PUNCH_REQ_MAX: Lazy<usize> =
     Lazy::new(|| get_arg("MAX_PUNCH_REQUESTS").parse().unwrap_or(100_000));
 
+/// Per-IP registration limits: `RegisterPk` requests in a row without a pause of
+/// `IP_BLOCK_DUR` seconds, and distinct IDs within `DAY_SECONDS`. Many machines
+/// behind one NAT may need more.
+static MAX_REGISTER_BURST_PER_IP: Lazy<u32> =
+    Lazy::new(|| positive_arg("MAX_REGISTER_BURST_PER_IP", 30));
+static MAX_NEW_IDS_PER_IP: Lazy<usize> = Lazy::new(|| positive_arg("MAX_NEW_IDS_PER_IP", 300));
+
+fn positive_arg<T: std::str::FromStr + PartialOrd + Default + std::fmt::Display>(
+    name: &str,
+    default: T,
+) -> T {
+    let value = get_arg(name);
+    if value.is_empty() {
+        return default;
+    }
+    match value.trim().parse::<T>() {
+        Ok(n) if n > T::default() => n,
+        _ => {
+            log::warn!("Invalid {name} {value:?}, using {default}");
+            default
+        }
+    }
+}
+
 async fn record_punch_req(from_ip: String, to_ip: String, to_id: String) {
     let max = *PUNCH_REQ_MAX;
     if max == 0 {
@@ -348,6 +373,11 @@ impl RendezvousServer {
             } else {
                 "N"
             }
+        );
+        log::info!(
+            "MAX_REGISTER_BURST_PER_IP={}, MAX_NEW_IDS_PER_IP={}",
+            *MAX_REGISTER_BURST_PER_IP,
+            *MAX_NEW_IDS_PER_IP
         );
         if test_addr.to_lowercase() != "no" {
             let test_addr = if test_addr.is_empty() {
@@ -1436,30 +1466,31 @@ impl RendezvousServer {
     async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
         let mut lock = IP_BLOCKER.lock().await;
         let now = Instant::now();
-        if let Some(old) = lock.get_mut(ip) {
-            let counter = &mut old.0;
-            if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
-                counter.0 = 0;
-            } else if counter.0 > 30 {
-                return false;
-            }
-            counter.0 += 1;
-            counter.1 = now;
-
-            let counter = &mut old.1;
-            let is_new = counter.0.get(id).is_none();
-            if counter.1.elapsed().as_secs() > DAY_SECONDS {
-                counter.0.clear();
-            } else if counter.0.len() > 300 {
-                return !is_new;
-            }
-            if is_new {
-                counter.0.insert(id.to_owned());
-            }
-            counter.1 = now;
-        } else {
-            lock.insert(ip.to_owned(), ((0, now), (Default::default(), now)));
+        let old = lock
+            .entry(ip.to_owned())
+            .or_insert_with(|| ((0, now), (Default::default(), now)));
+        let counter = &mut old.0;
+        if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
+            counter.0 = 0;
         }
+        if counter.0 >= *MAX_REGISTER_BURST_PER_IP {
+            return false;
+        }
+        counter.0 += 1;
+        counter.1 = now;
+
+        let counter = &mut old.1;
+        let is_new = counter.0.get(id).is_none();
+        if counter.1.elapsed().as_secs() > DAY_SECONDS {
+            counter.0.clear();
+        }
+        if counter.0.len() >= *MAX_NEW_IDS_PER_IP {
+            return !is_new;
+        }
+        if is_new {
+            counter.0.insert(id.to_owned());
+        }
+        counter.1 = now;
         true
     }
 

@@ -16,6 +16,28 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: per-IP registration limits are settings (2026-11-04)
+
+Issue #12. Based on a change proposed upstream by @devhem, rustdesk-server
+PR 742, with the same setting names.
+
+- `MAX_NEW_IDS_PER_IP` / `--max-new-ids-per-ip` (default 300): distinct IDs
+  one client IP may register in 24 hours. `MAX_REGISTER_BURST_PER_IP` /
+  `--max-register-burst-per-ip` (default 30): registrations from one IP
+  without a 60-second pause. Both were fixed in the code. A company or MSP
+  with many machines behind one NAT hit the first, and new machines showed
+  "ID does not exist". Read from the environment, `.env`, `--config` or the
+  flag; a value that is not a positive whole number is logged and the
+  default used. Both are logged at start.
+- The limits now count exactly. Before, the first registration from an IP
+  was not counted towards either, and each check let one more through, so
+  32 registrations in a row and 302 IDs were allowed.
+- They cover every registration path: `RegisterPk` over UDP, TCP and
+  WebSocket.
+- README (Configuration) and `docs/environment-variables.md`.
+- Test in `tests/stream_registration.rs`, one limit set by flag and one by
+  environment.
+
 ### hbbs: the UDP self-test survives failed sends (2026-11-04)
 
 Issue #11. Reported upstream by @littletow, rustdesk-server issue 444.
