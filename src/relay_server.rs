@@ -1,7 +1,8 @@
 // Modified by the CortenDesk Server project on 2026-11-03: client address from
-// trusted proxies and a WebSocket handshake timeout; relay session reports. See
-// CHANGES.md. This file is part of a modified version of rustdesk-server,
-// distributed under the AGPL-3.0 like the original.
+// trusted proxies and a WebSocket handshake timeout; relay session reports.
+// Modified on 2026-11-04: a timeout on relay writes. See CHANGES.md.
+// This file is part of a modified version of rustdesk-server, distributed under
+// the AGPL-3.0 like the original.
 
 use async_speed_limit::Limiter;
 use async_trait::async_trait;
@@ -58,6 +59,9 @@ static LIMIT_SPEED: AtomicUsize = AtomicUsize::new(32 * 1024 * 1024); // in bit/
 static TOTAL_BANDWIDTH: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024); // in bit/s
 static SINGLE_BANDWIDTH: AtomicUsize = AtomicUsize::new(128 * 1024 * 1024); // in bit/s
 const BLACKLIST_FILE: &str = "blacklist.txt";
+/// A write to one side that takes longer than this ends the session: that side
+/// has stopped reading, and waiting would keep the pair open forever.
+const RELAY_WRITE_TIMEOUT_MS: u64 = if cfg!(test) { 300 } else { 30_000 };
 const BLOCKLIST_FILE: &str = "blocklist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
@@ -557,7 +561,7 @@ async fn relay(
                     total_s += nb;
                     *carried += bytes.len();
                     if !bytes.is_empty() {
-                        stream.send_raw(bytes.into()).await?;
+                        send_timed(stream, bytes.into()).await?;
                     }
                 } else {
                     break;
@@ -577,7 +581,7 @@ async fn relay(
                     total_s += nb;
                     *carried += bytes.len();
                     if !bytes.is_empty() {
-                        peer.send_raw(bytes.into()).await?;
+                        send_timed(&mut **peer, bytes.into()).await?;
                     }
                 } else {
                     break;
@@ -623,6 +627,13 @@ async fn relay(
         }
     }
     Ok(())
+}
+
+async fn send_timed<S: StreamTrait + ?Sized>(stream: &mut S, bytes: Bytes) -> ResultType<()> {
+    match timeout(RELAY_WRITE_TIMEOUT_MS, stream.send_raw(bytes)).await {
+        Ok(res) => res,
+        Err(_) => bail!("write timed out"),
+    }
 }
 
 fn get_server_sk(key: &str) -> String {
@@ -704,4 +715,71 @@ impl StreamTrait for tokio_tungstenite::WebSocketStream<TcpStream> {
     }
 
     fn set_raw(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Yields `data` once, then nothing; writes hang when `stalled`.
+    struct TestStream {
+        data: Option<BytesMut>,
+        stalled: bool,
+    }
+
+    #[async_trait]
+    impl StreamTrait for TestStream {
+        async fn recv(&mut self) -> Option<Result<BytesMut, Error>> {
+            match self.data.take() {
+                Some(data) => Some(Ok(data)),
+                None => std::future::pending().await,
+            }
+        }
+        async fn send_raw(&mut self, _: Bytes) -> ResultType<()> {
+            if self.stalled {
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
+        }
+        fn is_ws(&self) -> bool {
+            false
+        }
+        fn set_raw(&mut self) {}
+    }
+
+    async fn stalled_write_ends_relay(towards_peer: bool) {
+        let x = || Some(BytesMut::from(&b"x"[..]));
+        let mut stream = TestStream {
+            data: if towards_peer { x() } else { None },
+            stalled: !towards_peer,
+        };
+        let mut peer: Box<dyn StreamTrait> = Box::new(TestStream {
+            data: if towards_peer { None } else { x() },
+            stalled: towards_peer,
+        });
+        let mut carried = 0;
+        let res = timeout(
+            5_000,
+            relay(
+                "192.0.2.1:1".parse().unwrap(),
+                &mut stream,
+                &mut peer,
+                Limiter::new(f64::INFINITY),
+                "stalled-write-test".to_owned(),
+                &mut carried,
+            ),
+        )
+        .await
+        .expect("a stalled write must end the relay");
+        let err = res.expect_err("the relay must fail");
+        assert!(err.to_string().contains("write timed out"), "{err}");
+        assert_eq!(carried, 1);
+    }
+
+    #[hbb_common::tokio::test]
+    async fn stalled_writes_end_the_relay_both_ways() {
+        stalled_write_ends_relay(true).await;
+        stalled_write_ends_relay(false).await;
+    }
 }

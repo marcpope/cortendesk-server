@@ -14,6 +14,18 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## 1.3.1 (unreleased)
+
+### hbbr: relay writes time out (2026-11-04)
+
+Issue #2. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 723.
+
+- A write to either side of a relayed session that takes over 30 seconds ends
+  the session. Before, when one side stopped reading (a frozen app, or a dead
+  network that never sends a reset), the write waited forever, the 30-second
+  idle check never ran, and the session and its relay report never closed.
+- Unit test in `src/relay_server.rs`.
+
 ## 1.3.0 (2026-11-03)
 
 ### Connection paths for the console's connection log (2026-11-03)
