@@ -12,8 +12,8 @@
 // `always-use-relay` leaves the relay list alone; the punch request log is
 // capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
-// self-test survives failed sends; configurable per-IP registration limits.
-// See CHANGES.md.
+// self-test survives failed sends; configurable per-IP registration limits; a
+// failed UDP reply no longer rebuilds the UDP socket. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -470,7 +470,11 @@ impl RendezvousServer {
                 }
                 Some(data) = rx.recv() => {
                     match data {
-                        Data::Msg(msg, addr) => { allow_err!(socket.send(msg.as_ref(), addr).await); }
+                        Data::Msg(msg, addr) => {
+                            if let Err(err) = udp_send(socket, msg.as_ref(), addr).await {
+                                log::debug!("UDP send to {} failed: {}", addr, err);
+                            }
+                        }
                         Data::RelayServers0(rs) => { self.parse_relay_servers(&rs); }
                         Data::RelayServers(rs) => { self.relay_servers = Arc::new(rs); }
                     }
@@ -478,9 +482,14 @@ impl RendezvousServer {
                 res = socket.next() => {
                     match res {
                         Some(Ok((bytes, addr))) => {
-                            if let Err(err) = self.handle_udp(&bytes, addr.into(), socket, key).await {
-                                log::error!("udp failure: {}", err);
-                                return LoopFailure::UdpSocket;
+                            // One failed reply is that client's problem, not the
+                            // socket's: drop it and carry on (issue #9).
+                            let addr: SocketAddr = addr.into();
+                            if !is_unicast_source(addr) {
+                                continue;
+                            }
+                            if let Err(err) = self.handle_udp(&bytes, addr, socket, key).await {
+                                log::debug!("UDP reply to {} failed: {}", addr, err);
                             }
                         }
                         Some(Err(err)) => {
@@ -566,7 +575,7 @@ impl RendezvousServer {
                                 rendezvous_servers: (*self.rendezvous_servers).clone(),
                                 ..Default::default()
                             });
-                            socket.send(&msg_out, addr).await?;
+                            udp_send(socket, &msg_out, addr).await?;
                         }
                     }
                 }
@@ -615,7 +624,7 @@ impl RendezvousServer {
                             url: self.inner.software_url.clone(),
                             ..Default::default()
                         });
-                        socket.send(&msg_out, addr).await?;
+                        udp_send(socket, &msg_out, addr).await?;
                     }
                 }
                 _ => {}
@@ -949,7 +958,7 @@ impl RendezvousServer {
             request_pk,
             ..Default::default()
         });
-        socket.send(&msg_out, socket_addr).await
+        udp_send(socket, &msg_out, socket_addr).await
     }
 
     #[inline]
@@ -990,7 +999,7 @@ impl RendezvousServer {
         {
             self.send_to_tcp_sync(msg_out, addr_a).await?;
         } else if let Some(socket) = socket {
-            socket.send(&msg_out, addr_a).await?;
+            udp_send(socket, &msg_out, addr_a).await?;
         } else {
             self.send_to_tcp(msg_out, addr_a).await;
         }
@@ -1029,7 +1038,7 @@ impl RendezvousServer {
         {
             self.send_to_tcp_sync(msg_out, addr_a).await?;
         } else if let Some(socket) = socket {
-            socket.send(&msg_out, addr_a).await?;
+            udp_send(socket, &msg_out, addr_a).await?;
         } else {
             self.send_to_tcp(msg_out, addr_a).await;
         }
@@ -2155,7 +2164,7 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
                   log::error!("hbbs stopped answering its UDP self-test on {addr}; exiting to be restarted");
                   std::process::exit(1);
               }
-              let res = socket.send(&msg_out, addr).await;
+              let res = udp_send(&mut socket, &msg_out, addr).await;
               state.sent(addr, res)?;
           }
           Some(Ok((bytes, _))) = socket.next() => {
@@ -2179,7 +2188,35 @@ async fn send_rk_res(
         result: res.into(),
         ..Default::default()
     });
-    socket.send(&msg_out, addr).await
+    udp_send(socket, &msg_out, addr).await
+}
+
+/// Sends one datagram. `FramedSocket::send` goes through tokio-util's
+/// `UdpFramed` sink, which keeps a datagram whose send failed and retries it
+/// before every later one, so one bad destination failed every reply after it
+/// until the socket was rebuilt (issue #9). This writes to the socket itself.
+async fn udp_send(
+    socket: &mut FramedSocket,
+    msg: &impl hbb_common::protobuf::Message,
+    addr: SocketAddr,
+) -> ResultType<()> {
+    match socket {
+        FramedSocket::Direct(framed) => {
+            framed.get_ref().send_to(&msg.write_to_bytes()?, addr).await?;
+            Ok(())
+        }
+        socket => socket.send(msg, addr).await,
+    }
+}
+
+/// Whether a datagram's source can be answered: a port, and a unicast address.
+/// Nothing is sent to port 0, broadcast, multicast or the unspecified address.
+fn is_unicast_source(addr: SocketAddr) -> bool {
+    addr.port() != 0
+        && match norm_ip(addr.ip()) {
+            IpAddr::V4(ip) => !(ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast()),
+            IpAddr::V6(ip) => !(ip.is_unspecified() || ip.is_multicast()),
+        }
 }
 
 async fn create_udp_listener(
@@ -2423,6 +2460,43 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+
+    #[test]
+    fn only_unicast_sources_are_answered() {
+        for ok in ["192.0.2.1:21116", "[2001:db8::1]:5", "[::ffff:192.0.2.1]:5"] {
+            assert!(is_unicast_source(ok.parse().unwrap()), "{ok}");
+        }
+        for bad in [
+            "192.0.2.1:0",
+            "0.0.0.0:5",
+            "255.255.255.255:5",
+            "224.0.0.1:5",
+            "[::]:5",
+            "[ff02::1]:5",
+            "[::ffff:255.255.255.255]:5",
+        ] {
+            assert!(!is_unicast_source(bad.parse().unwrap()), "{bad}");
+        }
+    }
+
+    /// A send that fails leaves nothing behind: the next one, to another
+    /// address, goes out (issue #9). Through `FramedSocket::send` it would
+    /// retry the failed datagram first and fail too.
+    #[hbb_common::tokio::test]
+    async fn a_failed_udp_send_does_not_block_the_next() {
+        let mut socket = FramedSocket::new("0.0.0.0:0").await.unwrap();
+        let receiver = hbb_common::tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut msg = RendezvousMessage::new();
+        msg.set_register_peer_response(RegisterPeerResponse::default());
+        // No SO_BROADCAST on this socket: sending to broadcast fails.
+        assert!(udp_send(&mut socket, &msg, "255.255.255.255:9".parse().unwrap())
+            .await
+            .is_err());
+        udp_send(&mut socket, &msg, receiver.local_addr().unwrap()).await.unwrap();
+        let mut buf = [0u8; 64];
+        let (n, _) = timeout(2_000, receiver.recv_from(&mut buf)).await.unwrap().unwrap();
+        assert_eq!(&buf[..n], &msg.write_to_bytes().unwrap()[..]);
     }
 
     #[test]

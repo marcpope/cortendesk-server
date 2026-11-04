@@ -16,6 +16,24 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: one failed UDP reply no longer rebuilds the UDP socket (2026-11-04)
+
+Issue #9. Based on a fix proposed upstream by @jahvari, rustdesk-server
+PR 738, done in this tree because that PR changes `hbb_common`.
+
+- A UDP reply that fails is logged at debug level and dropped. Before, it
+  rebuilt the UDP socket, and every client's packets were lost meanwhile.
+  Under load (`ENOBUFS`) or with odd source addresses this could repeat.
+- Replies are written to the socket directly. `hbb_common`'s
+  `FramedSocket::send` goes through tokio-util's `UdpFramed`, which keeps a
+  datagram whose send failed and sends it again before every later one, so
+  after one failure every reply failed until the socket was rebuilt. That is
+  why the rebuild was there.
+- Datagrams from port 0 or from a broadcast, multicast or unspecified address
+  are ignored: there is nothing to answer.
+- A failed receive still rebuilds the socket, as before.
+- Unit tests in `src/rendezvous_server.rs`.
+
 ### README: reverse proxy advice for the WebSocket ports (2026-11-04)
 
 - "Running it" told operators to put the WebSocket ports behind a proxy that
