@@ -2,7 +2,7 @@
 // trusted proxies and a WebSocket handshake timeout; relay session reports.
 // Modified on 2026-11-04: a timeout on relay writes; pairing under one lock;
 // key file errors stop the server; a size limit before pairing; whole admin
-// console replies. See CHANGES.md.
+// console replies; relay session uuids are not logged. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -494,7 +494,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     let mut peers = PEERS.lock().await;
                     if let Some(mut waiting) = peers.remove(&rf.uuid) {
                         drop(peers);
-                        log::info!("Relayrequest {} from {} got paired", rf.uuid, addr);
+                        log::info!("Relay request from {} got paired", addr);
                         let report = crate::relay_report::opened(
                             &rf.uuid,
                             (&rf.id, rf.conn_type.value(), addr),
@@ -523,7 +523,7 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                             crate::relay_report::closed(report, carried);
                         }
                     } else {
-                        log::info!("New relay request {} from {}", rf.uuid, addr);
+                        log::info!("New relay request from {}", addr);
                         let token = Arc::new(());
                         peers.insert(
                             rf.uuid.clone(),

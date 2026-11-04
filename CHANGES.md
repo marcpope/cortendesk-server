@@ -14,6 +14,14 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## Unreleased
+
+### hbbr: relay session uuids no longer logged (2026-11-04)
+
+- The "New relay request" and "got paired" lines log the client address
+  only. The uuid pairs the two halves of a session, so it stays out of logs
+  (CodeQL alert 92).
+
 ## 1.4.0 (2026-11-04)
 
 ### hbbs: UDP hole punching and IPv6 peer-to-peer for RustDesk 1.5 (2026-11-04)
