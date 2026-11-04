@@ -16,6 +16,16 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### CodeQL: skip hbb_common; device uuids no longer logged (2026-11-04)
+
+- New `.github/codeql/codeql-config.yml`, used by
+  `.github/workflows/codeql.yml`: `libs/hbb_common`, RustDesk's library used
+  unmodified as a submodule, is left out of the scan. Most open alerts were
+  in its client code and test vectors. Everything else is still scanned.
+- `hbbs` no longer logs the two device uuids when a registration's uuid does
+  not match the stored one; it logs the ID and that another machine
+  registered it.
+
 ### Dependency advisories (2026-11-04)
 
 For the open Dependabot alerts.

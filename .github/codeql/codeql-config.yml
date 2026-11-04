@@ -1,0 +1,9 @@
+# CodeQL configuration, read by .github/workflows/codeql.yml.
+name: CortenDesk Server CodeQL config
+
+# libs/hbb_common is RustDesk's shared library, used unmodified as a git
+# submodule (see NOTICE). Its alerts are about client code and test vectors
+# this project does not change; report them upstream instead. Everything
+# else in the repository is scanned.
+paths-ignore:
+  - libs/hbb_common

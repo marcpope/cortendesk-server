@@ -14,8 +14,8 @@
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
 // self-test survives failed sends; configurable per-IP registration limits; a
 // failed UDP reply no longer rebuilds the UDP socket; the `release-id` admin
-// command; idle cache entries are pruned; key exchange version 1. See
-// CHANGES.md.
+// command; idle cache entries are pruned; key exchange version 1; device
+// uuids are not logged. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -765,12 +765,8 @@ impl RendezvousServer {
                         return UUID_MISMATCH;
                     }
                 } else {
-                    log::warn!(
-                        "Peer {} uuid mismatch: {:?} vs {:?}",
-                        id,
-                        rk.uuid,
-                        peer.uuid
-                    );
+                    // Not the uuids themselves: they identify the machines.
+                    log::warn!("Peer {} uuid mismatch: registered by another machine", id);
                     drop(peer);
                     return UUID_MISMATCH;
                 }
