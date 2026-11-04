@@ -14,7 +14,7 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
-## 1.4.0 (unreleased)
+## 1.4.0 (2026-11-04)
 
 ### hbbs: UDP hole punching and IPv6 peer-to-peer for RustDesk 1.5 (2026-11-04)
 
