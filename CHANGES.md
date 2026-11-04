@@ -16,6 +16,16 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: `always-use-relay` leaves the relay list alone (2026-11-04)
+
+Issue #4. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 716.
+
+- The admin console command `always-use-relay` / `aur` only sets the flag.
+  Before, it also passed its argument to the relay server list, so `aur Y`
+  replaced the list with "Y", which is not a valid server and left the list
+  empty. Its help line now shows the argument: `always-use-relay(aur) [Y|N]`.
+- New test `tests/admin_console.rs`.
+
 ### hbbr: legs that arrive together are paired (2026-11-04)
 
 Issue #3. Reported upstream with a repro by @wb113, rustdesk-server issue 708;

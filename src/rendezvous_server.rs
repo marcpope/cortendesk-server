@@ -8,7 +8,8 @@
 // answers and ICE candidates, `crate::webrtc_signal`). Modified on 2026-11-03:
 // connection path tags (`conn_audit_ref`); persistent TCP and WebSocket
 // registration for desktop clients and the client address from trusted
-// proxies, based on PR #1 by vk2amv. See CHANGES.md.
+// proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
+// `always-use-relay` leaves the relay list alone. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -1446,7 +1447,7 @@ impl RendezvousServer {
                     "ip-blocker(ib) [<ip>|<number>] [-]",
                     "ip-changes(ic) [<id>|<number>] [-]",
                     "punch-requests(pr) [<number>] [-]",
-                    "always-use-relay(aur)",
+                    "always-use-relay(aur) [Y|N]",
                     "test-geo(tg) <ip1> <ip2>",
                     "policy(pol)"
                 )
@@ -1571,7 +1572,6 @@ impl RendezvousServer {
                     } else {
                         ALWAYS_USE_RELAY.store(false, Ordering::SeqCst);
                     }
-                    self.tx.send(Data::RelayServers0(rs.to_owned())).ok();
                 } else {
                     let _ = writeln!(
                         res,
