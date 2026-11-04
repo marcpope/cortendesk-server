@@ -11,8 +11,8 @@
 // proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
 // `always-use-relay` leaves the relay list alone; the punch request log is
 // capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
-// signalling messages are at most 1 MiB; whole admin console replies. See
-// CHANGES.md.
+// signalling messages are at most 1 MiB; whole admin console replies; the UDP
+// self-test survives failed sends. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -355,6 +355,8 @@ impl RendezvousServer {
             } else {
                 test_addr.parse()?
             };
+            // A self-test that cannot start is logged and dropped; hbbs keeps
+            // running. Only its watchdog ends the process (see `test_hbbs`).
             tokio::spawn(async move {
                 if let Err(err) = test_hbbs(test_addr).await {
                     if test_addr.is_ipv6() && test_addr.ip().is_unspecified() {
@@ -362,11 +364,9 @@ impl RendezvousServer {
                         test_addr.set_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
                         if let Err(err) = test_hbbs(test_addr).await {
                             log::error!("Failed to run hbbs test with {test_addr}: {err}");
-                            std::process::exit(1);
                         }
                     } else {
                         log::error!("Failed to run hbbs test with {test_addr}: {err}");
-                        std::process::exit(1);
                     }
                 }
             });
@@ -2039,6 +2039,62 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
 }
 
 // temp solution to solve udp socket failure
+/// Watchdog state of the UDP self-test.
+struct SelfTest {
+    answered: bool,
+    last_answer: Instant,
+    failing: bool,
+}
+
+impl SelfTest {
+    const TIMEOUT_SECS: u64 = 12;
+
+    fn new() -> Self {
+        Self {
+            answered: false,
+            last_answer: Instant::now(),
+            failing: false,
+        }
+    }
+
+    fn answer(&mut self) {
+        self.answered = true;
+        self.last_answer = Instant::now();
+    }
+
+    /// The outcome of one send. A failure before any answer means the test
+    /// cannot run on this address (for example no IPv6 loopback) and is
+    /// returned. Later ones are logged and the send is retried: a request that
+    /// was not sent gets no answer, so they do not count towards the timeout.
+    fn sent(&mut self, addr: SocketAddr, res: ResultType<()>) -> ResultType<()> {
+        match res {
+            Ok(()) => {
+                if self.failing {
+                    log::info!("hbbs self-test: sending to {addr} works again");
+                    self.failing = false;
+                }
+            }
+            Err(err) if !self.answered => return Err(err),
+            Err(err) => {
+                if !self.failing {
+                    log::warn!("hbbs self-test: send to {addr} failed, retrying: {err}");
+                    self.failing = true;
+                }
+                self.last_answer = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    fn timed_out(&self) -> bool {
+        self.last_answer.elapsed().as_secs() > Self::TIMEOUT_SECS
+    }
+}
+
+/// Sends a `RegisterPeer` to this hbbs every second. If hbbs stops answering
+/// requests that were sent, its UDP socket is assumed dead and the process
+/// exits so its supervisor restarts it, as upstream does. Failed sends never
+/// end it (issue #11).
 async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
     let mut addr = addr;
     if addr.ip().is_unspecified() {
@@ -2055,21 +2111,26 @@ async fn test_hbbs(addr: SocketAddr) -> ResultType<()> {
         id: "(:test_hbbs:)".to_owned(),
         ..Default::default()
     });
-    let mut last_time_recv = Instant::now();
+    let mut state = SelfTest::new();
 
     let mut timer = interval(Duration::from_secs(1));
     loop {
         tokio::select! {
           _ = timer.tick() => {
-              if last_time_recv.elapsed().as_secs() > 12 {
-                  bail!("Timeout of test_hbbs");
+              if state.timed_out() {
+                  if !state.answered {
+                      bail!("Timeout of test_hbbs");
+                  }
+                  log::error!("hbbs stopped answering its UDP self-test on {addr}; exiting to be restarted");
+                  std::process::exit(1);
               }
-              socket.send(&msg_out, addr).await?;
+              let res = socket.send(&msg_out, addr).await;
+              state.sent(addr, res)?;
           }
           Some(Ok((bytes, _))) = socket.next() => {
               if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
                  log::trace!("Recv {:?} of test_hbbs", msg_in);
-                 last_time_recv = Instant::now();
+                 state.answer();
               }
           }
         }
@@ -2331,6 +2392,29 @@ mod tests {
         let bind_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let socket = create_udp_listener(Some(bind_addr), 0, 0).await.unwrap();
         assert_eq!(socket.local_addr().unwrap().ip(), bind_addr);
+    }
+
+    #[test]
+    fn self_test_survives_failed_sends() {
+        let addr: SocketAddr = "127.0.0.1:21116".parse().unwrap();
+        let failed = || -> ResultType<()> { Err(anyhow!("Operation not permitted (os error 1)")) };
+        // Before any answer: the test cannot run here; the caller falls back.
+        let mut state = SelfTest::new();
+        assert!(state.sent(addr, failed()).is_err());
+        // Once hbbs has answered, a failed send is retried and never counts
+        // towards the timeout, however long it lasts.
+        let mut state = SelfTest::new();
+        state.answer();
+        state.last_answer = Instant::now() - Duration::from_secs(60);
+        assert!(state.timed_out());
+        assert!(state.sent(addr, failed()).is_ok());
+        assert!(state.failing && !state.timed_out());
+        assert!(state.sent(addr, Ok(())).is_ok());
+        assert!(!state.failing);
+        // Sends that work but get no answer still time out.
+        state.last_answer = Instant::now() - Duration::from_secs(SelfTest::TIMEOUT_SECS + 1);
+        assert!(state.sent(addr, Ok(())).is_ok());
+        assert!(state.timed_out());
     }
 
     #[hbb_common::tokio::test]

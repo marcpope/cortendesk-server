@@ -16,6 +16,21 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: the UDP self-test survives failed sends (2026-11-04)
+
+Issue #11. Reported upstream by @littletow, rustdesk-server issue 444.
+
+- A failed send in the self-test (`TEST_HBBS`), for example `EPERM` from a
+  firewall, is logged once and retried every second. Before, one failed send
+  ended the process with `exit(1)`, so `hbbs` stopped after running for a
+  while and stayed down unless something restarted it.
+- A self-test that cannot start, on IPv6 and then IPv4, is logged and dropped;
+  `hbbs` keeps running. Before, that also exited.
+- Kept from upstream: once `hbbs` has answered the self-test, 12 seconds of
+  sent requests without an answer still exit the process so a supervisor
+  restarts it. Failed sends do not count towards those 12 seconds.
+- Unit test in `src/rendezvous_server.rs`.
+
 ### Admin console replies arrive whole (2026-11-04)
 
 Issue #8. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 717.
