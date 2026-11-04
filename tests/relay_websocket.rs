@@ -26,6 +26,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 // test files' ports.
 const PORT: i32 = 31236;
 const PORT_RACE: i32 = 31276;
+const PORT_LIMITS: i32 = 31296;
 const KEY: &str = "relay-test-key";
 
 struct Hbbr(Child);
@@ -106,7 +107,11 @@ fn non_loopback_ip() -> Option<std::net::IpAddr> {
 }
 
 async fn tcp_join(ip: std::net::IpAddr, uuid: &str) -> Framed<TcpStream, BytesCodec> {
-    let stream = TcpStream::connect((ip, PORT as u16)).await.unwrap();
+    tcp_join_on(PORT, ip, uuid).await
+}
+
+async fn tcp_join_on(port: i32, ip: std::net::IpAddr, uuid: &str) -> Framed<TcpStream, BytesCodec> {
+    let stream = TcpStream::connect((ip, port as u16)).await.unwrap();
     let mut framed = Framed::new(stream, BytesCodec::new());
     framed
         .send(Bytes::from(request_relay(uuid, KEY)))
@@ -183,4 +188,80 @@ async fn relay_pairs_legs_that_arrive_together() {
         a.send(Message::Binary(b"ping".to_vec().into())).await.unwrap();
         assert_eq!(ws_recv(b).await.as_deref(), Some(&b"ping"[..]), "pair {i}");
     }
+}
+
+
+/// Write, under `ws`, the start of a masked binary frame that announces
+/// `announced` bytes, and `sent` of them. A server without a limit waits for
+/// the rest.
+async fn partial_ws_frame(ws: &mut Ws, announced: u64, sent: usize) -> &mut TcpStream {
+    use hbb_common::tokio::io::AsyncWriteExt;
+    let tokio_tungstenite::MaybeTlsStream::Plain(sock) = ws.get_mut() else {
+        panic!("plain socket")
+    };
+    let mut frame = vec![0x82, 0xff];
+    frame.extend_from_slice(&announced.to_be_bytes());
+    frame.extend_from_slice(&[1, 2, 3, 4]);
+    frame.resize(frame.len() + sent, 0);
+    let _ = sock.write_all(&frame).await;
+    sock
+}
+
+/// Whether the server closes `stream` within 3 seconds.
+async fn tcp_closed(stream: &mut TcpStream) -> bool {
+    use hbb_common::tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 1024];
+    loop {
+        match timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
+            Err(_) => return false,
+            Ok(Ok(0) | Err(_)) => return true,
+            Ok(Ok(_)) => continue,
+        }
+    }
+}
+
+/// Before pairing a connection may send at most 64 KB; a paired one any
+/// amount (issue #7).
+#[tokio::test]
+async fn relay_limits_size_before_pairing_only() {
+    use hbb_common::tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    let _hbbr = spawn_hbbr_on(dir.path(), PORT_LIMITS).await;
+    let big = vec![7u8; 2 * 1024 * 1024];
+
+    // Unpaired WebSocket: 100 KB of a 10 MB message closes the connection.
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{}", PORT_LIMITS + 2))
+        .await
+        .unwrap();
+    let sock = partial_ws_frame(&mut ws, 10 << 20, 100 << 10).await;
+    assert!(tcp_closed(sock).await, "oversized WebSocket message before pairing");
+
+    // Unpaired TCP: a frame header announcing 1 MB closes the connection.
+    let ip = non_loopback_ip().expect("a non-loopback address to reach hbbr over TCP");
+    let mut tcp = TcpStream::connect((ip, PORT_LIMITS as u16)).await.unwrap();
+    tcp.write_all(&(((1u32 << 20) << 2) | 3).to_le_bytes()).await.unwrap();
+    assert!(tcp_closed(&mut tcp).await, "oversized TCP frame before pairing");
+
+    // Paired WebSocket to WebSocket: 2 MB goes through.
+    let mut a = ws_join_on(PORT_LIMITS, "big-ws", KEY).await;
+    sleep(Duration::from_millis(300)).await;
+    let mut b = ws_join_on(PORT_LIMITS, "big-ws", KEY).await;
+    sleep(Duration::from_millis(300)).await;
+    a.send(Message::Binary(big.clone().into())).await.unwrap();
+    assert_eq!(ws_recv(&mut b).await.map(|m| m.len()), Some(big.len()));
+
+    // Paired TCP (framed, as it is opposite a WebSocket) to WebSocket.
+    let mut browser = ws_join_on(PORT_LIMITS, "big-tcp", KEY).await;
+    sleep(Duration::from_millis(300)).await;
+    let mut desktop = tcp_join_on(PORT_LIMITS, ip, "big-tcp").await;
+    sleep(Duration::from_millis(300)).await;
+    desktop.send(Bytes::from(big.clone())).await.unwrap();
+    assert_eq!(ws_recv(&mut browser).await.map(|m| m.len()), Some(big.len()));
+    browser.send(Message::Binary(big.clone().into())).await.unwrap();
+    let got = timeout(Duration::from_secs(3), desktop.next())
+        .await
+        .expect("desktop gets bytes")
+        .expect("stream open")
+        .expect("frame");
+    assert_eq!(got.len(), big.len());
 }

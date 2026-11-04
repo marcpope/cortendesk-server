@@ -16,6 +16,27 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Message size limits before sign-in and pairing (2026-11-04)
+
+Issue #7. Based on the message size limits proposed upstream by @jahvari,
+rustdesk-server PR 726. That PR's cap on connections is not taken: every
+device registered over WebSocket or TCP holds a connection.
+
+- `hbbs`: signalling messages are at most 1 MiB, on TCP (frame length, checked
+  on the frame header) and on WebSocket (`max_message_size` and
+  `max_frame_size`). A larger one closes the connection. Before, a TCP frame
+  could announce up to 1 GiB and a WebSocket message 64 MiB.
+- `hbbr`: before a connection is paired it may send at most 64 KB: on TCP a
+  frame longer than that, on WebSocket more than that many bytes in all,
+  handshake included, closes it. Once paired, the limits are what they were.
+  tungstenite cannot change a WebSocket's message limits once it is open, so
+  on WebSocket the limit is on bytes read from the socket.
+- Tests: in `tests/stream_registration.rs`, an online request of 40000 IDs
+  still answered and oversized TCP and WebSocket frames refused; in
+  `tests/relay_websocket.rs`, oversized frames before pairing refused and
+  2 MB messages carried after it, WebSocket to WebSocket and TCP to
+  WebSocket.
+
 ### Key files: unreadable private key stops the server, stale `.pub` rewritten (2026-11-04)
 
 Issue #6. Reported upstream by @layer6org, rustdesk-server issue 678. Ported

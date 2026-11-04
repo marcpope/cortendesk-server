@@ -1,7 +1,7 @@
 // Modified by the CortenDesk Server project on 2026-11-03: client address from
 // trusted proxies and a WebSocket handshake timeout; relay session reports.
 // Modified on 2026-11-04: a timeout on relay writes; pairing under one lock;
-// key file errors stop the server. See CHANGES.md.
+// key file errors stop the server; a size limit before pairing. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -31,6 +31,8 @@ use std::{
     collections::{HashMap, HashSet},
     io::prelude::*,
     io::Error,
+    pin::Pin,
+    task::{Context, Poll},
     net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
@@ -66,6 +68,11 @@ const BLACKLIST_FILE: &str = "blacklist.txt";
 /// A write to one side that takes longer than this ends the session: that side
 /// has stopped reading, and waiting would keep the pair open forever.
 const RELAY_WRITE_TIMEOUT_MS: u64 = if cfg!(test) { 300 } else { 30_000 };
+/// Most a connection may send before it is paired: its relay request, and on
+/// WebSocket the HTTP handshake too. A paired connection has no such limit.
+/// Before, a TCP frame could announce up to 1 GiB and a WebSocket message
+/// 64 MiB from a client that had not shown it knew a session.
+const MAX_BEFORE_PAIRING: usize = 64 * 1024;
 const BLOCKLIST_FILE: &str = "blocklist.txt";
 
 #[tokio::main(flavor = "multi_thread")]
@@ -456,6 +463,7 @@ async fn make_pair(
             addr.set_ip(crate::common::client_ip(addr.ip(), req.headers()));
             Ok(response)
         };
+        let stream = ReadBudget::new(stream);
         let ws_stream = timeout(5_000, tokio_tungstenite::accept_hdr_async(stream, callback)).await??;
         if BLOCKLIST.read().await.get(&addr.ip().to_string()).is_some() {
             log::info!("{} blocked", addr.ip());
@@ -463,7 +471,9 @@ async fn make_pair(
         }
         make_pair_(ws_stream, addr, key, limiter).await;
     } else {
-        make_pair_(FramedStream::from(stream, addr), addr, key, limiter).await;
+        let mut stream = FramedStream::from(stream, addr);
+        stream.codec_mut().set_max_packet_length(MAX_BEFORE_PAIRING);
+        make_pair_(stream, addr, key, limiter).await;
     }
     Ok(())
 }
@@ -490,6 +500,8 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                             (&waiting.id, waiting.conn_type, waiting.addr),
                         );
                         let peer = &mut waiting.stream;
+                        stream.paired();
+                        peer.paired();
                         let id = format!("{}:{}", addr.ip(), addr.port());
                         USAGE.write().await.insert(id.clone(), Default::default());
                         if !stream.is_ws() && !peer.is_ws() {
@@ -683,6 +695,8 @@ trait StreamTrait: Send + Sync + 'static {
     async fn send_raw(&mut self, bytes: Bytes) -> ResultType<()>;
     fn is_ws(&self) -> bool;
     fn set_raw(&mut self);
+    /// Lift the size limit that applies before pairing.
+    fn paired(&mut self);
 }
 
 #[async_trait]
@@ -702,10 +716,76 @@ impl StreamTrait for FramedStream {
     fn set_raw(&mut self) {
         self.set_raw();
     }
+
+    fn paired(&mut self) {
+        self.codec_mut().set_max_packet_length(usize::MAX);
+    }
+}
+
+/// The socket under a WebSocket relay connection. tungstenite's message limits
+/// cannot change once the connection is open, so the limit before pairing is
+/// on the bytes read from the socket instead: `MAX_BEFORE_PAIRING` in all,
+/// handshake included, then none.
+struct ReadBudget {
+    inner: TcpStream,
+    left: Option<usize>,
+}
+
+impl ReadBudget {
+    fn new(inner: TcpStream) -> Self {
+        Self {
+            inner,
+            left: Some(MAX_BEFORE_PAIRING),
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for ReadBudget {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let Some(left) = this.left else {
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        };
+        if left == 0 {
+            return Poll::Ready(Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "too much data before pairing",
+            )));
+        }
+        let max = left.min(buf.remaining());
+        let mut part = tokio::io::ReadBuf::new(buf.initialize_unfilled_to(max));
+        let res = Pin::new(&mut this.inner).poll_read(cx, &mut part);
+        let n = part.filled().len();
+        buf.advance(n);
+        this.left = Some(left - n);
+        res
+    }
+}
+
+impl tokio::io::AsyncWrite for ReadBudget {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 #[async_trait]
-impl StreamTrait for tokio_tungstenite::WebSocketStream<TcpStream> {
+impl StreamTrait for tokio_tungstenite::WebSocketStream<ReadBudget> {
     async fn recv(&mut self) -> Option<Result<BytesMut, Error>> {
         if let Some(msg) = self.next().await {
             match msg {
@@ -735,6 +815,10 @@ impl StreamTrait for tokio_tungstenite::WebSocketStream<TcpStream> {
     }
 
     fn set_raw(&mut self) {}
+
+    fn paired(&mut self) {
+        self.get_mut().left = None;
+    }
 }
 
 #[cfg(test)]
@@ -766,6 +850,7 @@ mod tests {
             false
         }
         fn set_raw(&mut self) {}
+        fn paired(&mut self) {}
     }
 
     async fn stalled_write_ends_relay(towards_peer: bool) {

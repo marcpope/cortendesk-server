@@ -703,3 +703,60 @@ async fn ids_over_253_bytes_are_refused() {
     send(&mut initiator, punch(&longest, &server.key)).await;
     assert!(recv(&mut ws).await.has_punch_hole());
 }
+
+/// Write, under `ws`, the start of a masked binary frame that announces
+/// `announced` bytes, and `sent` of them. A server without a limit waits for
+/// the rest.
+async fn partial_ws_frame(ws: &mut Ws, announced: u64, sent: usize) -> &mut TcpStream {
+    use hbb_common::tokio::io::AsyncWriteExt;
+    let tokio_tungstenite::MaybeTlsStream::Plain(sock) = ws.get_mut() else {
+        panic!("plain socket")
+    };
+    let mut frame = vec![0x82, 0xff];
+    frame.extend_from_slice(&announced.to_be_bytes());
+    frame.extend_from_slice(&[1, 2, 3, 4]);
+    frame.resize(frame.len() + sent, 0);
+    let _ = sock.write_all(&frame).await;
+    sock
+}
+
+/// Signalling messages over 1 MiB close the connection, on WebSocket and TCP;
+/// a large online request still fits (issue #7).
+#[tokio::test]
+async fn signalling_messages_over_1_mib_are_refused() {
+    use hbb_common::tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start().await;
+    // 40000 IDs, about 560 KB.
+    let ids: Vec<String> = (0..40_000).map(|i| format!("{:09}", 100_000_000 + i)).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    assert_eq!(server.online(&ids).await.len(), 5_000);
+
+    // The start of a 2 MiB WebSocket frame.
+    let mut ws = server.ws().await;
+    let sock = partial_ws_frame(&mut ws, 2 << 20, 64 << 10).await;
+    let closed = timeout(Duration::from_secs(3), async {
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = sock.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "oversized WebSocket message");
+
+    let mut tcp = TcpStream::connect(("127.0.0.1", server.port)).await.unwrap();
+    tcp.write_all(&((((1u32 << 20) + 1) << 2) | 3).to_le_bytes())
+        .await
+        .unwrap();
+    let closed = timeout(Duration::from_secs(3), async {
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = tcp.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "oversized TCP frame");
+}

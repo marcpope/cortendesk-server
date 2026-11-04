@@ -10,8 +10,8 @@
 // registration for desktop clients and the client address from trusted
 // proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
 // `always-use-relay` leaves the relay list alone; the punch request log is
-// capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`.
-// See CHANGES.md.
+// capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
+// signalling messages are at most 1 MiB. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -71,6 +71,23 @@ enum Data {
 
 /// Versioned so the console can tell our tags from anything else in the field.
 const AUDIT_REF_PREFIX: &str = "cd1/";
+/// Largest signalling message accepted, on TCP and WebSocket. The largest real
+/// ones, online requests for big address books, are a few hundred KB at most.
+/// Before, a TCP frame could announce up to 1 GiB and a WebSocket message
+/// 64 MiB, all buffered before anything was checked.
+const MAX_SIGNAL_MESSAGE: usize = 1024 * 1024;
+
+fn signal_codec() -> BytesCodec {
+    let mut codec = BytesCodec::new();
+    codec.set_max_packet_length(MAX_SIGNAL_MESSAGE);
+    codec
+}
+
+fn signal_ws_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_SIGNAL_MESSAGE))
+        .max_frame_size(Some(MAX_SIGNAL_MESSAGE))
+}
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 
@@ -1645,7 +1662,8 @@ impl RendezvousServer {
             });
             return;
         }
-        let stream = FramedStream::from(stream, addr);
+        let mut stream = FramedStream::from(stream, addr);
+        *stream.codec_mut() = signal_codec();
         tokio::spawn(async move {
             let mut stream = stream;
             if let Some(Ok(bytes)) = stream.next_timeout(30_000).await {
@@ -1697,13 +1715,17 @@ impl RendezvousServer {
             };
             let stream = timeout(
                 WRITE_TIMEOUT,
-                tokio_tungstenite::accept_hdr_async(stream, callback),
+                tokio_tungstenite::accept_hdr_async_with_config(
+                    stream,
+                    callback,
+                    Some(signal_ws_config()),
+                ),
             )
             .await??;
             let (tx, rx) = stream.split();
             (Sink::Ws(tx), Reader::Ws(rx), None)
         } else {
-            let (tx, rx) = Framed::new(stream, BytesCodec::new()).split();
+            let (tx, rx) = Framed::new(stream, signal_codec()).split();
             let mut sink = TcpSink {
                 sink: tx,
                 encrypt: None,
