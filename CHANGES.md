@@ -16,6 +16,33 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: idle cache entries are pruned (2026-11-04)
+
+Issue #10. Based on a change proposed upstream by @jahvari, rustdesk-server
+PR 727.
+
+- Every minute `hbbs` drops from memory the peers that have been idle for 10
+  minutes: no WebSocket or TCP registration, no UDP registration and no
+  `RegisterPk` in that time, and not held by a request in progress. The
+  database keeps them, and they are loaded again when asked for. Before,
+  every ID ever seen stayed in memory until restart.
+- Peers with a live WebSocket or TCP registration are never dropped, however
+  long since they last used UDP. The access policy's address match is not
+  affected: it keeps its own record of who registered from where, for 30
+  seconds.
+- Entries for the per-IP registration limits are dropped once both their
+  windows (60 seconds, 24 hours) have passed, and the `ip-changes` log once
+  its 6 minutes have. Before, both only shrank when an operator ran
+  `ip-blocker` or `ip-changes` on the admin console.
+- At most 1,000,000 IPs are tracked for the per-IP limits. Past that, after
+  dropping expired entries, a new IP registers without being tracked, and a
+  warning is logged once a minute. Upstream's PR refuses it instead, which
+  would let a flood of spoofed UDP sources keep every new IP out for a day.
+- At most 128 addresses are kept per ID in the `ip-changes` log.
+- Not taken from that PR: caps on the peer cache. Pruning bounds it by the
+  devices in use, and a cap would refuse devices on a large server.
+- Unit tests in `src/peer.rs`.
+
 ### hbbs: `release-id` admin command (2026-11-04)
 
 Issue #19. Requested upstream by @shahidullahr, rustdesk-server issue 483.

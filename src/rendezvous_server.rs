@@ -14,7 +14,7 @@
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
 // self-test survives failed sends; configurable per-IP registration limits; a
 // failed UDP reply no longer rebuilds the UDP socket; the `release-id` admin
-// command. See CHANGES.md.
+// command; idle cache entries are pruned. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -458,8 +458,13 @@ impl RendezvousServer {
         key: &str,
     ) -> LoopFailure {
         let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
+        let mut timer_prune = interval(Duration::from_secs(60));
         loop {
             tokio::select! {
+                _ = timer_prune.tick() => {
+                    let pm = self.pm.clone();
+                    tokio::spawn(async move { pm.prune().await });
+                }
                 _ = timer_check_relay.tick() => {
                     if self.relay_servers0.len() > 1 {
                         let rs = self.relay_servers0.clone();
@@ -734,7 +739,7 @@ impl RendezvousServer {
                     ips.insert(ip.clone(), 1);
                 } else if let Some(v) = ips.get_mut(&ip) {
                     *v += 1;
-                } else {
+                } else if ips.len() < MAX_IP_CHANGES_PER_ID {
                     ips.insert(ip.clone(), 1);
                 }
             } else {
@@ -1474,34 +1479,14 @@ impl RendezvousServer {
     }
 
     async fn check_ip_blocker(&self, ip: &str, id: &str) -> bool {
-        let mut lock = IP_BLOCKER.lock().await;
-        let now = Instant::now();
-        let old = lock
-            .entry(ip.to_owned())
-            .or_insert_with(|| ((0, now), (Default::default(), now)));
-        let counter = &mut old.0;
-        if counter.1.elapsed().as_secs() > IP_BLOCK_DUR {
-            counter.0 = 0;
-        }
-        if counter.0 >= *MAX_REGISTER_BURST_PER_IP {
-            return false;
-        }
-        counter.0 += 1;
-        counter.1 = now;
-
-        let counter = &mut old.1;
-        let is_new = counter.0.get(id).is_none();
-        if counter.1.elapsed().as_secs() > DAY_SECONDS {
-            counter.0.clear();
-        }
-        if counter.0.len() >= *MAX_NEW_IDS_PER_IP {
-            return !is_new;
-        }
-        if is_new {
-            counter.0.insert(id.to_owned());
-        }
-        counter.1 = now;
-        true
+        ip_blocker_allows(
+            &mut *IP_BLOCKER.lock().await,
+            ip,
+            id,
+            *MAX_REGISTER_BURST_PER_IP,
+            *MAX_NEW_IDS_PER_IP,
+            MAX_IP_BLOCKER_ENTRIES,
+        )
     }
 
     /// The `release-id` admin command: forget a peer so another machine can

@@ -159,7 +159,7 @@ pub fn note_registration(id: &str, ip: IpAddr) {
 
 /// Peers registered from `ip` recently, not counting `target`: a device never
 /// connects to itself, so the target cannot be the one asking.
-fn candidates(ip: IpAddr, target: &str) -> Vec<String> {
+pub(crate) fn candidates(ip: IpAddr, target: &str) -> Vec<String> {
     let Ok(seen) = SEEN.lock() else { return vec![] };
     seen.by_ip
         .get(&norm(ip))
