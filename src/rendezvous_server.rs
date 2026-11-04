@@ -924,8 +924,10 @@ impl RendezvousServer {
                     allow_err!(self.handle_hole_sent(phs, addr, None).await);
                 }
                 Some(rendezvous_message::Union::LocalAddr(la)) => {
-                    // The TCP peer, not `addr`: on WebSocket `addr` comes from
-                    // X-Real-IP / X-Forwarded-For, which any client can set.
+                    // `peer_ip` is the client address: the TCP peer, or on
+                    // WebSocket the address a proxy listed in TRUSTED_PROXIES
+                    // names in X-Forwarded-For. Not `addr`, whose port on
+                    // WebSocket is a correlation token, not the client's.
                     policy::note_local_addr(&la.id, AddrMangle::decode(&la.local_addr), peer_ip);
                     allow_err!(self.handle_local_addr(la, addr, None).await);
                 }
