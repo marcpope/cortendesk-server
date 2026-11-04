@@ -5,10 +5,18 @@
 
 [advisories]
 ignore = [
-  # users: root appended to group listings. Only the group listing functions
-  # are affected; hbb_common uses get_current_uid and get_user_by_uid. No
+  # users 0.11: root appended to group listings (2025-0040), and an unaligned
+  # read of the group member list (2023-0059). hbb_common only re-exports the
+  # crate (`pub use users`); nothing in hbb_common, hbbs or hbbr calls it. No
   # fixed release exists.
   "RUSTSEC-2025-0040",
+  "RUSTSEC-2023-0059",
+
+  # atty 0.2: unaligned read, in its Windows-only code path. Pulled in by
+  # flexi_logger 0.22, hbb_common's env_logger 0.9 and the clap 2 that
+  # bindgen 0.59 uses at build time; the release binaries are Linux only.
+  # Unmaintained, so there is no fixed release.
+  "RUSTSEC-2021-0145",
 
   # zstd 0.13 / zstd-safe 7: a reused stream context leaking data, legacy
   # frame decompression exposing uninitialised memory, and seekable

@@ -16,6 +16,25 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Dependency advisories (2026-11-04)
+
+For the open Dependabot alerts.
+
+- `deadpool` without its default features, keeping only `managed`, which is
+  all `src/database.rs` uses. That drops `config` 0.11 and with it `nom` 5
+  and `lexical-core` 0.7 (RUSTSEC-2023-0086).
+- `.cargo/audit.toml` accepts, with the reason beside each:
+  RUSTSEC-2023-0059 (`users`, unaligned read; `hbb_common` only re-exports
+  the crate and nothing calls it) next to the already accepted
+  RUSTSEC-2025-0040, and RUSTSEC-2021-0145 (`atty`, unaligned read in its
+  Windows-only code; the release binaries are Linux only).
+- `clap` stays at 2. Moving this project's own flags to clap 4 would remove
+  neither `clap` 2 nor `atty` from `Cargo.lock`: `hbb_common` pulls both in
+  through `bindgen` 0.59 and its loggers.
+- `cargo audit` passes; what remains are informational warnings
+  (unmaintained crates, and `zstd-safe` and `tokio` soundness notes for code
+  these servers do not call).
+
 ### hbbs: signalling key exchange version 1 (2026-11-04)
 
 Issue #17. Requested upstream by @Silvarion, rustdesk-server issue 709; based
