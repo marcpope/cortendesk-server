@@ -1,5 +1,5 @@
 // Modified by the CortenDesk Server project on 2026-11-04: `delete_peer`, for
-// releasing an ID. See CHANGES.md. This file is part of a modified version of
+// releasing an ID; sqlx 0.8. See CHANGES.md. This file is part of a modified version of
 // rustdesk-server, distributed under the AGPL-3.0 like the original.
 
 use async_trait::async_trait;
@@ -22,8 +22,8 @@ impl deadpool::managed::Manager for DbPool {
     type Type = SqliteConnection;
     type Error = SqlxError;
     async fn create(&self) -> Result<SqliteConnection, SqlxError> {
-        let mut opt = SqliteConnectOptions::from_str(&self.url).unwrap();
-        opt.log_statements(log::LevelFilter::Debug);
+        let opt = SqliteConnectOptions::from_str(&self.url)?
+            .log_statements(log::LevelFilter::Debug);
         SqliteConnection::connect_with(&opt).await
     }
     async fn recycle(
@@ -153,6 +153,48 @@ impl Database {
         .execute(self.pool.get().await?.deref_mut())
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    use deadpool::managed::Manager;
+    use hbb_common::tokio;
+
+    /// A database written by CortenDesk Server 1.3.0 (sqlx 0.6) opens, reads,
+    /// updates and deletes with sqlx 0.8 (issue #14). The fixture holds two
+    /// peers, 123456781 and 123456782, registered through 1.3.0's UDP path.
+    #[hbb_common::tokio::test]
+    async fn a_1_3_0_database_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db_v2.sqlite3");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/peers-1.3.0.sqlite3"),
+            &path,
+        )
+        .unwrap();
+        let db = Database::new(path.to_str().unwrap()).await.unwrap();
+        let old = db.get_peer("123456781").await.unwrap().expect("1.3.0 peer");
+        assert_eq!(old.uuid, b"machine-one");
+        assert_eq!(old.pk, vec![7; 32]);
+        db.update_pk(&old.guid, "123456781", &[3; 32], "{\"ip\":\"192.0.2.9\"}")
+            .await
+            .unwrap();
+        let updated = db.get_peer("123456781").await.unwrap().unwrap();
+        assert_eq!((updated.guid, updated.pk), (old.guid, vec![3; 32]));
+        let guid = db.insert_peer("123456783", b"new", &[1; 32], "{}").await.unwrap();
+        assert_eq!(db.get_peer("123456783").await.unwrap().unwrap().guid, guid);
+        assert!(db.delete_peer("123456782").await.unwrap());
+        assert!(db.get_peer("123456782").await.unwrap().is_none());
+    }
+
+    #[hbb_common::tokio::test]
+    async fn invalid_connection_options_are_an_error() {
+        let manager = DbPool {
+            url: "sqlite://unused?mode=invalid".to_owned(),
+        };
+        assert!(manager.create().await.is_err());
     }
 }
 

@@ -5,43 +5,10 @@
 
 [advisories]
 ignore = [
-  # libsqlite3-sys 0.24 bundles SQLite older than 3.39.2 (CVE-2022-35737).
-  # The overflow needs a string argument of billions of bytes passed to the
-  # C API. Every value the server stores comes from a single network frame.
-  # Fixed only by moving to sqlx 0.7 or later.
-  "RUSTSEC-2022-0090",
-
-  # sqlx 0.6 binary protocol casts. Affects the Postgres and MySQL drivers;
-  # this server only uses SQLite. Fixed in sqlx 0.8.1.
-  "RUSTSEC-2024-0363",
-
-  # rustls 0.20 complete_io loop. Pulled in by sqlx's runtime-tokio-rustls
-  # feature, which only opens TLS for Postgres and MySQL. SQLite never does.
-  # Goes away with sqlx 0.7 or later.
-  "RUSTSEC-2024-0336",
-
-  # ring AES functions can panic when overflow checks are enabled. Release
-  # builds run without overflow checks (Cargo's release default, not
-  # overridden in Cargo.toml). ring 0.16 has no fixed release.
-  "RUSTSEC-2025-0009",
-
   # users: root appended to group listings. Only the group listing functions
   # are affected; hbb_common uses get_current_uid and get_user_by_uid. No
   # fixed release exists.
   "RUSTSEC-2025-0040",
-
-  # quick-xml quadratic attribute check and namespace allocation. Reached only
-  # through wayland-scanner, which parses Wayland protocol XML shipped inside
-  # the crate at build time. Nothing parses XML at runtime.
-  "RUSTSEC-2026-0194",
-  "RUSTSEC-2026-0195",
-
-  # rustls 0.20 ServerHello downgrade and webpki-roots 0.22 distrusted emSign
-  # roots. Both come in only through sqlx's runtime-tokio-rustls feature,
-  # which opens TLS for Postgres and MySQL. This server uses SQLite, which
-  # never does. Go away with sqlx 0.7 or later.
-  "RUSTSEC-2026-0349",
-  "RUSTSEC-2026-0381",
 
   # zstd 0.13 / zstd-safe 7: a reused stream context leaking data, legacy
   # frame decompression exposing uninitialised memory, and seekable
@@ -52,6 +19,11 @@ ignore = [
   "RUSTSEC-2026-0391",
   "RUSTSEC-2026-0398",
   "RUSTSEC-2026-0403",
+
+  # rsa 0.9 Marvin timing side channel; no fixed release. In Cargo.lock only
+  # through sqlx-mysql, which is not built: sqlx's mysql feature is off
+  # (`cargo tree -i rsa --target all` finds no dependent).
+  "RUSTSEC-2023-0071",
 
   # crypto-bigint 0.5 timing variability. Present in Cargo.lock but not in
   # the build for any target (`cargo tree -i crypto-bigint --target all -e

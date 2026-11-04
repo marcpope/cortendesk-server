@@ -16,6 +16,29 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### sqlx 0.8, without database TLS (2026-11-04)
+
+Issue #14. Based on a change proposed upstream by @jahvari, rustdesk-server
+PR 731.
+
+- `sqlx` 0.6 to 0.8.6, with only the `runtime-tokio`, `sqlite`, `macros`,
+  `chrono` and `json` features. The old `runtime-tokio-rustls` feature only
+  opened TLS for Postgres and MySQL, which this server never uses. That takes
+  out `libsqlite3-sys` 0.24 (now 0.30, bundling a current SQLite),
+  `rustls` 0.20, `webpki` 0.22, `webpki-roots` 0.22 and `ring` 0.16.
+- An invalid `DB_URL` option is an error instead of a panic.
+- `.cargo/audit.toml`: removed the accepted advisories whose crates are no
+  longer in `Cargo.lock`: RUSTSEC-2022-0090, RUSTSEC-2024-0363,
+  RUSTSEC-2024-0336, RUSTSEC-2025-0009, RUSTSEC-2026-0349, RUSTSEC-2026-0381,
+  and RUSTSEC-2026-0194 and -0195 (`quick-xml`, already gone). Added
+  RUSTSEC-2023-0071 (`rsa`, no fixed release): it is in `Cargo.lock` only
+  through `sqlx-mysql`, which is not built. `cargo audit` passes.
+- Checked against a `db_v2.sqlite3` written by the published 1.3.0 image:
+  existing peers are read (same uuid registers, another gets
+  `UUID_MISMATCH`), new ones are written, and `release-id` deletes. That
+  database is kept as `tests/fixtures/peers-1.3.0.sqlite3` for a unit test
+  in `src/database.rs`.
+
 ### hbbs: idle cache entries are pruned (2026-11-04)
 
 Issue #10. Based on a change proposed upstream by @jahvari, rustdesk-server
