@@ -16,6 +16,13 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### README: reverse proxy advice for the WebSocket ports (2026-11-04)
+
+- "Running it" told operators to put the WebSocket ports behind a proxy that
+  sets `X-Real-IP`. Since 1.3.0 that header is never read; the client address
+  comes from `X-Forwarded-For`, and only from a proxy listed in
+  `TRUSTED_PROXIES`. The paragraph now says so.
+
 ### Release source tarball with submodules (2026-11-04)
 
 Issue #16. Reported upstream by @SecurityCze, rustdesk-server issue 701.

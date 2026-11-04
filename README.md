@@ -84,10 +84,12 @@ services:
 ```
 
 Leave 21118/21119 (WebSocket) unpublished unless you have RustDesk clients in
-WebSocket mode. Then put them behind a reverse proxy that sets `X-Real-IP`:
-hbbs and hbbr take the client address from that header on WebSocket
-connections, so a directly exposed port lets a client claim any address.
-
+WebSocket mode. Then put them behind a reverse proxy that sets
+`X-Forwarded-For`, and list the proxy's address in `TRUSTED_PROXIES` on both
+`hbbs` and `hbbr`. Only a listed proxy's `X-Forwarded-For` is used;
+`X-Real-IP` is never read. Without `TRUSTED_PROXIES` every WebSocket client
+looks like the proxy to rate limits and the device policy. See
+[WebSocket desktop clients](#websocket-desktop-clients).
 
 Also published to `docker.io/marcpope/cortendesk-server`. Static `linux/amd64`
 and `linux/arm64` binaries are attached to each
