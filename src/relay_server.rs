@@ -1,7 +1,8 @@
 // Modified by the CortenDesk Server project on 2026-11-03: client address from
 // trusted proxies and a WebSocket handshake timeout; relay session reports.
 // Modified on 2026-11-04: a timeout on relay writes; pairing under one lock;
-// key file errors stop the server; a size limit before pairing. See CHANGES.md.
+// key file errors stop the server; a size limit before pairing; whole admin
+// console replies. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -430,7 +431,7 @@ async fn handle_connection(
             if let Ok(Ok(n)) = timeout(1000, stream.read(&mut buffer[..])).await {
                 if let Ok(data) = std::str::from_utf8(&buffer[..n]) {
                     let res = check_cmd(data, limiter).await;
-                    stream.write(res.as_bytes()).await.ok();
+                    stream.write_all(res.as_bytes()).await.ok();
                 }
             }
         });

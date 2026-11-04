@@ -11,7 +11,8 @@
 // proxies, based on PR #1 by vk2amv. Modified on 2026-11-04:
 // `always-use-relay` leaves the relay list alone; the punch request log is
 // capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
-// signalling messages are at most 1 MiB. See CHANGES.md.
+// signalling messages are at most 1 MiB; whole admin console replies. See
+// CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -1656,7 +1657,7 @@ impl RendezvousServer {
                 if let Ok(Ok(n)) = timeout(1000, stream.read(&mut buffer[..])).await {
                     if let Ok(data) = std::str::from_utf8(&buffer[..n]) {
                         let res = rs.check_cmd(data).await;
-                        stream.write(res.as_bytes()).await.ok();
+                        stream.write_all(res.as_bytes()).await.ok();
                     }
                 }
             });

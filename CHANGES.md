@@ -16,6 +16,16 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Admin console replies arrive whole (2026-11-04)
+
+Issue #8. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 717.
+
+- The loopback admin consoles of `hbbs` and `hbbr` write the whole reply.
+  Before, they wrote once and closed, so a reply larger than the socket could
+  take at once, such as a long block list, arrived cut short.
+- Test in `tests/admin_console.rs`: a 3 MB block list from `hbbr`, read
+  slowly.
+
 ### Message size limits before sign-in and pairing (2026-11-04)
 
 Issue #7. Based on the message size limits proposed upstream by @jahvari,

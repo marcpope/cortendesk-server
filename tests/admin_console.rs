@@ -18,6 +18,9 @@ use std::{
 // hbbs uses PORT_HBBS - 1 (the admin console), PORT_HBBS and PORT_HBBS + 2.
 // Clear of the other test files' ports.
 const PORT_HBBS: u16 = 31286;
+// hbbr uses PORT_HBBR (relay and, from loopback, the admin console) and
+// PORT_HBBR + 2.
+const PORT_HBBR: u16 = 31306;
 
 struct Process(Child);
 
@@ -72,4 +75,34 @@ async fn always_use_relay_keeps_the_relay_servers() {
     sleep(Duration::from_millis(200)).await;
     assert_eq!(command(console, "aur").await, "ALWAYS_USE_RELAY: false\n");
     assert_eq!(command(console, "rs").await, "127.0.0.1:21117\n");
+}
+
+/// A reply bigger than the socket buffers arrives whole even when the reader
+/// is slow (issue #8). Before, the console wrote it once and closed, so a
+/// long one, such as a big block list, came back cut short.
+#[tokio::test]
+async fn long_console_reply_arrives_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_hbbr"))
+        .current_dir(dir.path())
+        .args(["-p", &PORT_HBBR.to_string()])
+        .env_remove("KEY")
+        .env_remove("PORT")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _hbbr = wait_for(PORT_HBBR, child).await;
+    // 3000 entries of 1000 bytes; the console reads one 1 KB command at a time.
+    let entries = 3000;
+    for i in 0..entries {
+        command(PORT_HBBR, &format!("Ba {:0>1000}", i)).await;
+    }
+    let mut stream = TcpStream::connect(("127.0.0.1", PORT_HBBR)).await.unwrap();
+    stream.write_all(b"B").await.unwrap();
+    sleep(Duration::from_secs(1)).await;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.unwrap();
+    assert_eq!(reply.lines().count(), entries);
+    assert_eq!(reply.len(), entries * 1001);
 }
