@@ -1,15 +1,23 @@
 # CortenDesk Server
 
-ID/rendezvous (`hbbs`) and relay (`hbbr`) servers for RustDesk clients.
+**The ID and relay server of [CortenDesk](https://cortendesk.com)**, the free,
+open-source web console for RustDesk: devices, users, address books, device
+policies, audit logs, single sign-on and a browser client, in one Docker
+container.
 
-This is a fork of [rustdesk-server](https://github.com/rustdesk/rustdesk-server),
-in sync with upstream release 1.1.17, with two changes that matter:
-**signed-in clients can connect**, and **RustDesk 1.5 clients can connect over
-WebRTC** (since 1.2.0).
+> **Running CortenDesk? You already have this.** The CortenDesk Docker image
+> ships CortenDesk Server next to the console, so one container is the whole
+> deployment. [Install CortenDesk](https://cortendesk.com/install) ·
+> [Console repository](https://github.com/marcpope/cortendesk) ·
+> [Documentation](https://github.com/marcpope/cortendesk/wiki)
 
-It is a drop-in replacement. Same binaries, same ports, same command-line flags,
-same data files — point your existing compose file at these images and nothing
-else changes.
+On its own, CortenDesk Server is a drop-in replacement for
+[rustdesk-server](https://github.com/rustdesk/rustdesk-server): the same `hbbs`
+(ID/rendezvous) and `hbbr` (relay), forked from upstream release 1.1.17, with
+bug fixes and the features RustDesk clients and the CortenDesk console need.
+Same binaries, same ports, same command-line flags, same data files. Point your
+existing compose file at these images and nothing else changes. See
+[CortenDesk Server vs rustdesk-server](https://cortendesk.com/cortendesk-server).
 
 ## Why this fork exists
 
@@ -55,9 +63,22 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
   client can use the server through port 443 alone (since 1.3.0). Upstream
   `hbbs` refuses these registrations. See
   [WebSocket desktop clients](#websocket-desktop-clients).
-- Optional device policy from a CortenDesk console: refuse devices the
-  console has not approved, and devices marked incoming-only. Off unless
-  configured; see below.
+- Key exchange version 1 for RustDesk 1.5: a key per direction, bound to a
+  transcript of the exchange (since 1.4.0).
+- UDP hole punching and IPv6 peer-to-peer for RustDesk 1.5 clients (since
+  1.4.0). `UDP_PUNCH=N` / `IPV6_PUNCH=N` turn them off.
+- Client addresses on the WebSocket ports come from `X-Forwarded-For` only
+  when a proxy listed in `TRUSTED_PROXIES` sends it (since 1.3.0).
+- For the CortenDesk console: device policy (refuse devices the console has
+  not approved, and devices marked incoming-only; off unless configured, see
+  below), a tag on each connection request with the path it took (LAN, hole
+  punch, WebRTC, relay), relay session reports, and `release-id` to free an ID.
+- Fixes from the upstream backlog: relay legs that arrive together are paired,
+  stuck relay writes time out, one failed UDP reply no longer rebuilds the
+  socket, message size caps before sign-in, idle peers pruned from memory, key
+  files that can't be read stop the server, per-IP registration limits as
+  settings, and more. Several are based on upstream issues and pull requests,
+  each credited in CHANGES.md.
 - Packaging trimmed to what is published here: Docker images and static Linux
   binaries. Upstream's Debian packaging, Windows installer UI, s6 image and
   Kubernetes example are not carried.
