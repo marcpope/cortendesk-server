@@ -16,6 +16,19 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbr: legs that arrive together are paired (2026-11-04)
+
+Issue #3. Reported upstream with a repro by @wb113, rustdesk-server issue 708;
+based on a fix proposed upstream by @jahvari, rustdesk-server PR 721.
+
+- The second leg of a session is looked up and the first is stored under one
+  lock. Before, when both arrived at the same moment, each could miss the
+  other, the second replaced the first, and the session failed.
+- A waiting leg that expires after 30 seconds removes only itself. Before, it
+  removed whatever waited under its uuid, which could be a newer leg.
+- Tests: in `tests/relay_websocket.rs`, 64 sessions whose two legs arrive
+  together; a unit test for the expiry in `src/relay_server.rs`.
+
 ### hbbr: relay writes time out (2026-11-04)
 
 Issue #2. Based on a fix proposed upstream by @jahvari, rustdesk-server PR 723.

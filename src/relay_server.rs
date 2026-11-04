@@ -1,6 +1,7 @@
 // Modified by the CortenDesk Server project on 2026-11-03: client address from
 // trusted proxies and a WebSocket handshake timeout; relay session reports.
-// Modified on 2026-11-04: a timeout on relay writes. See CHANGES.md.
+// Modified on 2026-11-04: a timeout on relay writes; pairing under one lock.
+// See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -32,14 +33,17 @@ use std::{
     io::Error,
     net::{IpAddr, SocketAddr},
     sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
 };
 
 type Usage = (usize, usize, usize, usize);
 
 /// The first side of a pair, held until the other arrives. Its request is
 /// kept too: only the controller's names the device and the connection type,
-/// and either side may come first (issue #130).
+/// and either side may come first (issue #130). `token` tells this waiter
+/// from a later one with the same uuid, so its expiry removes only itself.
 struct Waiting {
+    token: Arc<()>,
     stream: Box<dyn StreamTrait>,
     id: String,
     conn_type: i32,
@@ -474,8 +478,11 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     return;
                 }
                 if !rf.uuid.is_empty() {
-                    let mut waiting = PEERS.lock().await.remove(&rf.uuid);
-                    if let Some(waiting) = waiting.as_mut() {
+                    // Look up and insert under one lock: two legs arriving
+                    // together must find each other.
+                    let mut peers = PEERS.lock().await;
+                    if let Some(mut waiting) = peers.remove(&rf.uuid) {
+                        drop(peers);
                         log::info!("Relayrequest {} from {} got paired", rf.uuid, addr);
                         let report = crate::relay_report::opened(
                             &rf.uuid,
@@ -504,21 +511,34 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                         }
                     } else {
                         log::info!("New relay request {} from {}", rf.uuid, addr);
-                        PEERS.lock().await.insert(
+                        let token = Arc::new(());
+                        peers.insert(
                             rf.uuid.clone(),
                             Waiting {
+                                token: token.clone(),
                                 stream: Box::new(stream),
                                 id: rf.id.clone(),
                                 conn_type: rf.conn_type.value(),
                                 addr,
                             },
                         );
+                        drop(peers);
                         sleep(30.).await;
-                        PEERS.lock().await.remove(&rf.uuid);
+                        expire_waiting(&mut *PEERS.lock().await, &rf.uuid, &token);
                     }
                 }
             }
         }
+    }
+}
+
+/// Remove the waiter for `uuid` only if it is still the one holding `token`.
+fn expire_waiting(peers: &mut HashMap<String, Waiting>, uuid: &str, token: &Arc<()>) {
+    if peers
+        .get(uuid)
+        .map_or(false, |waiting| Arc::ptr_eq(&waiting.token, token))
+    {
+        peers.remove(uuid);
     }
 }
 
@@ -775,6 +795,30 @@ mod tests {
         let err = res.expect_err("the relay must fail");
         assert!(err.to_string().contains("write timed out"), "{err}");
         assert_eq!(carried, 1);
+    }
+
+    fn waiting(token: &Arc<()>) -> Waiting {
+        Waiting {
+            token: token.clone(),
+            stream: Box::new(TestStream {
+                data: None,
+                stalled: false,
+            }),
+            id: String::new(),
+            conn_type: 0,
+            addr: "192.0.2.1:1".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn expiry_leaves_a_newer_waiter_alone() {
+        let (old, newer) = (Arc::new(()), Arc::new(()));
+        let mut peers = HashMap::new();
+        peers.insert("uuid".to_owned(), waiting(&newer));
+        expire_waiting(&mut peers, "uuid", &old);
+        assert!(peers.contains_key("uuid"));
+        expire_waiting(&mut peers, "uuid", &newer);
+        assert!(!peers.contains_key("uuid"));
     }
 
     #[hbb_common::tokio::test]

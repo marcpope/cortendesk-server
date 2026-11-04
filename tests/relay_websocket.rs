@@ -25,6 +25,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 // hbbr listens on PORT (TCP) and PORT + 2 (WebSocket). Clear of the other
 // test files' ports.
 const PORT: i32 = 31236;
+const PORT_RACE: i32 = 31276;
 const KEY: &str = "relay-test-key";
 
 struct Hbbr(Child);
@@ -37,9 +38,13 @@ impl Drop for Hbbr {
 }
 
 async fn spawn_hbbr(dir: &std::path::Path) -> Hbbr {
+    spawn_hbbr_on(dir, PORT).await
+}
+
+async fn spawn_hbbr_on(dir: &std::path::Path, port: i32) -> Hbbr {
     let child = Command::new(env!("CARGO_BIN_EXE_hbbr"))
         .current_dir(dir)
-        .args(["-p", &PORT.to_string(), "-k", KEY])
+        .args(["-p", &port.to_string(), "-k", KEY])
         .env_remove("KEY")
         .env_remove("PORT")
         .stdout(Stdio::null())
@@ -47,12 +52,12 @@ async fn spawn_hbbr(dir: &std::path::Path) -> Hbbr {
         .spawn()
         .expect("hbbr starts");
     for _ in 0..100 {
-        if TcpStream::connect(format!("127.0.0.1:{}", PORT + 2)).await.is_ok() {
+        if TcpStream::connect(format!("127.0.0.1:{}", port + 2)).await.is_ok() {
             return Hbbr(child);
         }
         sleep(Duration::from_millis(100)).await;
     }
-    panic!("hbbr never listened on {}", PORT + 2);
+    panic!("hbbr never listened on {}", port + 2);
 }
 
 fn request_relay(uuid: &str, key: &str) -> Vec<u8> {
@@ -68,7 +73,11 @@ fn request_relay(uuid: &str, key: &str) -> Vec<u8> {
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
 async fn ws_join(uuid: &str, key: &str) -> Ws {
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{}", PORT + 2))
+    ws_join_on(PORT, uuid, key).await
+}
+
+async fn ws_join_on(port: i32, uuid: &str, key: &str) -> Ws {
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{}", port + 2))
         .await
         .expect("websocket connects");
     ws.send(Message::Binary(request_relay(uuid, key).into()))
@@ -147,4 +156,31 @@ async fn relay_websocket_pairs_and_carries_bytes() {
     sleep(Duration::from_millis(300)).await;
     let _ = x.send(Message::Binary(b"leak".to_vec().into())).await;
     assert_eq!(ws_recv(&mut y).await, None, "no relay without the key");
+}
+
+/// Both legs of each session arrive at the same moment. hbbr must pair them
+/// every time (issue #3): before, each could miss the other and the second
+/// replaced the first.
+#[tokio::test]
+async fn relay_pairs_legs_that_arrive_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let _hbbr = spawn_hbbr_on(dir.path(), PORT_RACE).await;
+    let mut pairs = Vec::new();
+    for round in 0..4 {
+        let joins = (0..16).map(|i| {
+            let uuid = format!("race-{round}-{i}");
+            async move {
+                tokio::join!(
+                    ws_join_on(PORT_RACE, &uuid, KEY),
+                    ws_join_on(PORT_RACE, &uuid, KEY)
+                )
+            }
+        });
+        pairs.extend(hbb_common::futures::future::join_all(joins).await);
+    }
+    sleep(Duration::from_millis(300)).await;
+    for (i, (a, b)) in pairs.iter_mut().enumerate() {
+        a.send(Message::Binary(b"ping".to_vec().into())).await.unwrap();
+        assert_eq!(ws_recv(b).await.as_deref(), Some(&b"ping"[..]), "pair {i}");
+    }
 }
