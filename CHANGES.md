@@ -14,7 +14,7 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-11-03)
 
 ### Connection paths for the console's connection log (2026-11-03)
 
@@ -37,6 +37,56 @@ console now shows it per connection (CortenDesk issue #130).
 - Tests: `tests/relay_report.rs` against a real `hbbr` and a stand-in
   console; the tags are checked in `tests/access_policy.rs` and
   `tests/webrtc_signalling.rs`.
+
+### WebSocket and TCP registration for desktop clients (2026-11-03)
+
+Based on pull request #1 by vk2amv, which credits ideas from SctgDesk Server,
+lejianwen/rustdesk-server and BetterDesk (all AGPL-3.0; no code taken from
+them). Ported onto 1.3.0 with the fixes below.
+
+- `hbbs` accepts `RegisterPk` over TCP and WebSocket. Upstream answers
+  `NOT_SUPPORT`, so desktop clients in WebSocket mode, or with a proxy or
+  `disable-udp`, never come online. The connection stays open as the device's
+  registration: `keep_alive` 20 seconds, an empty heartbeat every 10, dropped
+  after 30 silent. The newest registration of an ID replaces the old one; UDP
+  presence is tracked apart from it.
+- `PunchHole`, `RequestRelay` and ICE candidates for a device registered this
+  way go over its connection, with the `cd1/` tags. Sessions to or from a
+  WebSocket client are relayed. `OnlineRequest` is answered on WebSocket.
+- Each connection has one writer and a queue of 64 messages; a full queue or a
+  write over 5 seconds closes it. A connection gets one reply through
+  `tcp_punch` per punch hole or relay request it sent, at most 8 owed;
+  anything else addressed to it by IP and port is dropped.
+- Registrations of the same ID are serialised by a lock for that ID. The UDP
+  loop never waits on it: a UDP `RegisterPk` that finds it taken gets
+  `TOO_FREQUENT` and the client retries. A failed database write returns
+  `SERVER_ERROR` and claims nothing.
+- New `TRUSTED_PROXIES` / `--trusted-proxies` on `hbbs` and `hbbr`:
+  comma-separated CIDRs of reverse proxies. On the WebSocket ports a
+  connection from one of them is identified by `X-Forwarded-For`, read from
+  the right: the first address that is not a listed proxy is the client.
+  Entries a client wrote to the left are never used. Default empty: no proxy
+  is trusted. `X-Real-IP` is no longer read. Before this, both servers took
+  `X-Real-IP` or the first `X-Forwarded-For` entry from anyone (upstream issue
+  #634).
+- That one client address is used for registration, the per-IP rate limit, the
+  IP/key mismatch check, the device policy's address match and LAN address
+  reports. So incoming-only is now enforced for signed-out WebSocket clients
+  behind a proxy; before, they all looked like the proxy. Stream heartbeats
+  keep the policy's address match fresh, as UDP `RegisterPeer` does.
+- Fixed in the port: the PR keyed TCP connections by plain IPv4 while UDP
+  peers on a dual-stack socket stay IPv4-mapped, so same-NAT pairs no longer
+  got `FetchLocalAddr` (`cd1/lan`). Both sides are now compared normalised.
+- `hbbr`: WebSocket handshake times out after 5 seconds, and the block list is
+  checked against the client address on WebSocket too.
+- A UDP `RegisterPk` without uuid or key is still dropped without a reply.
+- README: "WebSocket desktop clients"; `docs/environment-variables.md`:
+  `TRUSTED_PROXIES`. NOTICE names the new files.
+- New `src/stream_connection.rs`. Tests: `tests/stream_registration.rs`
+  (registration, heartbeats, reconnects, shared addresses, persistence
+  failure, relay framing for every native/WebSocket pair, the `cd1/punch` and
+  `cd1/relay` tags, one reply per request), and in `tests/access_policy.rs`
+  incoming-only over WebSocket behind a proxy.
 
 ## 1.2.0 (2026-11-01)
 

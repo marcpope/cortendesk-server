@@ -1,3 +1,8 @@
+// Modified by the CortenDesk Server project on 2026-11-03: client address from
+// trusted proxies and a WebSocket handshake timeout; relay session reports. See
+// CHANGES.md. This file is part of a modified version of rustdesk-server,
+// distributed under the AGPL-3.0 like the original.
+
 use async_speed_limit::Limiter;
 use async_trait::async_trait;
 use hbb_common::{
@@ -438,30 +443,16 @@ async fn make_pair(
     if ws {
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
         let callback = |req: &Request, response: Response| {
-            let headers = req.headers();
-            // X-Real-IP / X-Forwarded-For are trusted as-is so that the real
-            // client IP is preserved when the WebSocket port runs behind a
-            // reverse proxy (WSS). They are NOT validated: anyone who can reach
-            // this port directly can spoof an arbitrary IP, bypassing IP-based
-            // rate limiting / blocking and corrupting logged IPs. Do not expose
-            // the WebSocket port directly to untrusted networks; only the
-            // reverse proxy, which overwrites these headers, should be able to
-            // connect to it.
-            // https://github.com/rustdesk/rustdesk-server/issues/634
-            let real_ip = headers
-                .get("X-Real-IP")
-                .or_else(|| headers.get("X-Forwarded-For"))
-                .and_then(|header_value| header_value.to_str().ok());
-            if let Some(ip) = real_ip {
-                if ip.contains('.') {
-                    addr = format!("{ip}:0").parse().unwrap_or(addr);
-                } else {
-                    addr = format!("[{ip}]:0").parse().unwrap_or(addr);
-                }
-            }
+            // The client address, when a trusted reverse proxy names it in
+            // X-Forwarded-For; otherwise the TCP peer. Keeps the peer's port.
+            addr.set_ip(crate::common::client_ip(addr.ip(), req.headers()));
             Ok(response)
         };
-        let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback).await?;
+        let ws_stream = timeout(5_000, tokio_tungstenite::accept_hdr_async(stream, callback)).await??;
+        if BLOCKLIST.read().await.get(&addr.ip().to_string()).is_some() {
+            log::info!("{} blocked", addr.ip());
+            return Ok(());
+        }
         make_pair_(ws_stream, addr, key, limiter).await;
     } else {
         make_pair_(FramedStream::from(stream, addr), addr, key, limiter).await;

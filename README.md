@@ -43,7 +43,7 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
   encrypts the rest of the connection once it has. Requires a server key pair,
   which is the default (`-k _`, or the generated `id_ed25519`); with no key
   there is nothing to sign the offer with, so nothing is offered.
-- `hbbr` is untouched. Clients never run this exchange against the relay.
+- Clients never run this exchange against the relay (`hbbr`).
 - WebSocket connections are untouched. Clients skip the exchange there because
   the transport handles encryption, so offering it would only confuse them.
 - WebRTC signalling for RustDesk 1.5 clients: `hbbs` passes the WebRTC offer,
@@ -51,6 +51,10 @@ since 1.2.0), and the connection carries on in plain text exactly as before.
   `enable-webrtc` on can connect over WebRTC. Upstream `hbbs` drops them and
   those clients fall back to their other transports. Only on encrypted
   connections, and only between the two machines in the request.
+- Desktop clients can register over WebSocket or TCP and stay online, so a
+  client can use the server through port 443 alone (since 1.3.0). Upstream
+  `hbbs` refuses these registrations. See
+  [WebSocket desktop clients](#websocket-desktop-clients).
 - Optional device policy from a CortenDesk console: refuse devices the
   console has not approved, and devices marked incoming-only. Off unless
   configured; see below.
@@ -152,7 +156,9 @@ identifies the sender by, in order:
 1. a ticket signed with the shared secret, which the console's web client sends;
 2. the console access token a signed-in RustDesk client sends;
 3. its IP address, matched against devices that registered from that address
-   in the last 30 seconds, not counting the target.
+   in the last 30 seconds, not counting the target. On WebSocket through a
+   proxy listed in `TRUSTED_PROXIES`, that is the address the proxy names; the
+   same address is recorded when a device registers over WebSocket.
 
 Signed-in clients are identified exactly. The IP match is weak: behind a
 shared NAT, or a proxy that rewrites source addresses (Docker's userland
@@ -170,6 +176,47 @@ incoming-only devices, which is best effort for signed-out clients.
   same uuid and the server key. Stock clients only learn that uuid through
   `hbbs`, so the policy covers them; modified clients that agree on a uuid some
   other way can still use the relay.
+
+## WebSocket desktop clients
+
+Since 1.3.0, RustDesk desktop clients (1.4 and later) can use this server over
+WebSocket only, so everything goes through port 443. Upstream `hbbs` answers
+their registration with `NOT_SUPPORT`, so they never show as online. The same
+registration over plain TCP serves clients that use a proxy or have
+`disable-udp` set. Contributed by vk2amv.
+
+On the client:
+
+- `allow-websocket` = `Y` (Settings → Network → Use WebSocket).
+- ID server and relay server as a hostname, not an IP address. With a
+  hostname the client connects to `ws(s)://<host>/ws/id` and
+  `ws(s)://<host>/ws/relay` on the default port; with an IP address it goes
+  to `ws://<ip>:21118` and `:21119` directly, without TLS.
+- API server `https://<host>`: the client uses `wss://` only when the API
+  server is https. With `http://` it uses `ws://` on port 80.
+- The key as usual.
+
+On the server:
+
+- A reverse proxy with TLS on port 443:
+  - `/ws/id` to `hbbs` port 21118, `/ws/relay` to `hbbr` port 21119;
+  - HTTP/1.1 with the `Upgrade` and `Connection` headers passed on;
+  - a read timeout of at least 120 seconds;
+  - `X-Forwarded-For` set to the address the client connected from, replacing
+    what the client sent (nginx: `proxy_set_header X-Forwarded-For
+    $remote_addr;`). Appending also works, since the servers read it from the
+    right. `X-Real-IP` is not used.
+- `TRUSTED_PROXIES` on both `hbbs` and `hbbr`: the address the proxy connects
+  from, e.g. `127.0.0.1/32` when it runs on the same host or in the same
+  container. The default is empty: no proxy is trusted, the header is ignored,
+  and every WebSocket client looks like the proxy to rate limits and the
+  device policy.
+- Ports 21115 to 21117 can stay closed to these clients.
+
+How a registration lives: the client registers once per connection. `hbbs`
+answers with `keep_alive` 20 seconds, sends an empty heartbeat every 10
+seconds, and drops a connection silent for 30. The newest registration of an
+ID wins. Sessions to or from a WebSocket client go through the relay.
 
 ## Building
 

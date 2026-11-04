@@ -1,3 +1,8 @@
+// Modified by the CortenDesk Server project on 2026-11-03: client address from
+// trusted proxies (`client_ip`). See
+// CHANGES.md. This file is part of a modified version of rustdesk-server,
+// distributed under the AGPL-3.0 like the original.
+
 use clap::App;
 use hbb_common::{
     anyhow::{Context, Result}, log, ResultType
@@ -285,6 +290,86 @@ pub async fn listen_signal() -> Result<()> {
 // date, and it made a daily request to a third party that a self-hosted
 // server has no reason to make.
 
+/// Reverse proxies allowed to name the client in `X-Forwarded-For`, from
+/// `TRUSTED_PROXIES` / `--trusted-proxies`: comma-separated CIDRs. Empty, the
+/// default, trusts none, and the header is ignored.
+static TRUSTED_PROXIES: once_cell::sync::OnceCell<Vec<ipnetwork::IpNetwork>> =
+    once_cell::sync::OnceCell::new();
+
+pub fn parse_trusted_proxies(value: &str) -> ResultType<Vec<ipnetwork::IpNetwork>> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|item| {
+            item.parse::<ipnetwork::IpNetwork>()
+                .map_err(|err| hbb_common::anyhow::anyhow!("invalid trusted proxy {}: {}", item, err))
+        })
+        .collect()
+}
+
+/// Read `TRUSTED_PROXIES` once at startup. An invalid entry stops the server.
+pub fn init_trusted_proxies() -> ResultType<()> {
+    let proxies = parse_trusted_proxies(&get_arg("TRUSTED-PROXIES"))?;
+    if proxies.is_empty() {
+        log::info!("No trusted proxies: X-Forwarded-For is ignored");
+    } else {
+        log::info!("Trusted proxies: {:?}", proxies);
+    }
+    TRUSTED_PROXIES.set(proxies).ok();
+    Ok(())
+}
+
+/// The IPv4 address inside an IPv4-mapped IPv6 address, else `ip` itself.
+pub fn norm_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        ip => ip,
+    }
+}
+
+fn parse_hop(hop: &str) -> Option<IpAddr> {
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<SocketAddr>().ok().map(|a| a.ip()))
+        .or_else(|| hop.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
+        .map(norm_ip)
+}
+
+/// The client address of a WebSocket connection from `peer`. Only a trusted
+/// proxy may name it: `X-Forwarded-For` is read from the right, skipping
+/// trusted proxies, and the first other address is the client. Entries left of
+/// it were written by the client and are never used. An unreadable entry stops
+/// the walk at the last proxy.
+pub fn client_ip(peer: IpAddr, headers: &tungstenite::http::HeaderMap) -> IpAddr {
+    client_ip_with(peer, headers, TRUSTED_PROXIES.get().map_or(&[], |v| v.as_slice()))
+}
+
+fn client_ip_with(
+    peer: IpAddr,
+    headers: &tungstenite::http::HeaderMap,
+    trusted: &[ipnetwork::IpNetwork],
+) -> IpAddr {
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|net| net.contains(ip));
+    let mut client = norm_ip(peer);
+    if !is_trusted(client) {
+        return client;
+    }
+    let mut hops = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(value) = value.to_str() else { return client };
+        hops.extend(value.split(',').map(str::trim));
+    }
+    for hop in hops.into_iter().rev() {
+        let Some(ip) = parse_hop(hop) else { break };
+        client = ip;
+        if !is_trusted(ip) {
+            break;
+        }
+    }
+    client
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +403,51 @@ mod tests {
         assert_eq!(get_arg("rustdesk_config_alias_test"), "higher-priority");
         std::env::remove_var("RUSTDESK-CONFIG-ALIAS-TEST");
         std::env::remove_var("RUSTDESK_CONFIG_ALIAS_TEST");
+    }
+
+    fn xff(values: &[&str]) -> tungstenite::http::HeaderMap {
+        let mut headers = tungstenite::http::HeaderMap::new();
+        for v in values {
+            headers.append("X-Forwarded-For", v.parse().unwrap());
+        }
+        headers.insert("X-Real-IP", "192.0.2.66".parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn client_ip_trusts_only_configured_proxies() {
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        let none = parse_trusted_proxies("").unwrap();
+        let lo = parse_trusted_proxies("127.0.0.1/32, 10.0.0.0/8").unwrap();
+        // No trusted proxies: the header is ignored. X-Real-IP is never read.
+        assert_eq!(client_ip_with(proxy, &xff(&["198.51.100.7"]), &none), proxy);
+        // Untrusted peer: ignored.
+        let direct: IpAddr = "203.0.113.5".parse().unwrap();
+        assert_eq!(client_ip_with(direct, &xff(&["198.51.100.7"]), &lo), direct);
+        // A forged entry on the left is skipped; the proxy's own is on the right.
+        assert_eq!(
+            client_ip_with(proxy, &xff(&["6.6.6.6, 198.51.100.7"]), &lo).to_string(),
+            "198.51.100.7"
+        );
+        // Chained proxies, across header lines, v4-mapped and with ports.
+        assert_eq!(
+            client_ip_with(
+                "::ffff:127.0.0.1".parse().unwrap(),
+                &xff(&["6.6.6.6", "[2001:db8::7]:4000, 10.1.2.3:80"]),
+                &lo
+            )
+            .to_string(),
+            "2001:db8::7"
+        );
+        assert_eq!(
+            client_ip_with(proxy, &xff(&["::ffff:198.51.100.9"]), &lo).to_string(),
+            "198.51.100.9"
+        );
+        // Unreadable entry: stop at the last proxy.
+        assert_eq!(client_ip_with(proxy, &xff(&["198.51.100.7, junk"]), &lo), proxy);
+        // No header from a trusted proxy: the proxy itself.
+        assert_eq!(client_ip_with(proxy, &xff(&[]), &lo), proxy);
+        assert!(parse_trusted_proxies("10.0.0.0/8,nonsense").is_err());
     }
 
     #[test]

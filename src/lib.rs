@@ -6,3 +6,5 @@ mod peer;
 mod policy;
 mod webrtc_signal;
 mod version;
+
+mod stream_connection;

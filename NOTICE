@@ -16,9 +16,16 @@ source for this program — including these modifications — is published at:
     https://github.com/marcpope/cortendesk-server
 
 Files this project added outright, such as src/policy.rs,
-tests/access_policy.rs, tests/relay_websocket.rs and
-tests/signalling_handshake.rs, are licensed under the
-AGPL-3.0 as well.
+src/stream_connection.rs, tests/access_policy.rs, tests/relay_websocket.rs,
+tests/signalling_handshake.rs and tests/stream_registration.rs, are licensed
+under the AGPL-3.0 as well.
+
+WebSocket and TCP registration for desktop clients (src/stream_connection.rs,
+tests/stream_registration.rs and the matching parts of src/rendezvous_server.rs
+and src/peer.rs) is based on pull request #1 by vk2amv (Lindsay Harvey),
+contributed under the AGPL-3.0. It credits ideas from SctgDesk Server and
+lejianwen/rustdesk-server, both AGPL-3.0 forks of rustdesk-server, and from
+BetterDesk, AGPL-3.0. No code from those projects is included.
 
 libs/hbb_common is a git submodule of https://github.com/rustdesk/hbb_common and
 is used unmodified.

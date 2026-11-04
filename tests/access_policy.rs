@@ -45,6 +45,7 @@ const PORT_TOKEN: i32 = 31186;
 const PORT_OUTAGE: i32 = 31196;
 const PORT_LAN: i32 = 31206;
 const PORT_LAN_WS: i32 = 31216;
+const PORT_WS_PROXY: i32 = 31226;
 
 const SECRET: &str = "test-link-secret";
 
@@ -138,7 +139,17 @@ impl Drop for Hbbs {
 
 /// Start hbbs in `dir`, linked to `console` when given. Returns its key.
 fn spawn_hbbs(dir: &std::path::Path, port: i32, console: Option<&str>) -> (Hbbs, String) {
+    spawn_hbbs_env(dir, port, console, &[])
+}
+
+fn spawn_hbbs_env(
+    dir: &std::path::Path,
+    port: i32,
+    console: Option<&str>,
+    env: &[(&str, &str)],
+) -> (Hbbs, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_hbbs"));
+    cmd.envs(env.iter().copied());
     cmd.current_dir(dir)
         .args(["-p", &port.to_string(), "-k", "_"])
         .env("TEST_HBBS", "no")
@@ -659,4 +670,136 @@ async fn lan_address_over_websocket_ignores_forwarded_headers() {
     assert_eq!(all.len(), 1, "the report arrives once: {all:?}");
     assert_eq!(all[0]["id"], "lan-ws-target");
     assert_eq!(all[0]["ip"], "192.168.77.30");
+}
+
+type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
+
+/// A WebSocket connection arriving through a reverse proxy on 127.0.0.1 that
+/// sends this `X-Forwarded-For`.
+async fn ws_via_proxy(port: i32, xff: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://127.0.0.1:{}", port + 2).into_client_request().unwrap();
+    req.headers_mut().insert("X-Forwarded-For", xff.parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.expect("websocket connects").0
+}
+
+async fn ws_send(ws: &mut Ws, msg: RendezvousMessage) {
+    use tokio_tungstenite::tungstenite::Message;
+    ws.send(Message::Binary(msg.write_to_bytes().unwrap().into())).await.expect("sent");
+}
+
+/// The next message within `ms`, answering heartbeats on the way.
+async fn ws_reply(ws: &mut Ws, ms: u64) -> Option<RendezvousMessage> {
+    use tokio_tungstenite::tungstenite::Message;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        match tokio::time::timeout_at(deadline, ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) if b.is_empty() => {
+                ws.send(Message::Binary(Vec::new().into())).await.ok();
+            }
+            Ok(Some(Ok(Message::Binary(b)))) => {
+                return Some(RendezvousMessage::parse_from_bytes(&b).expect("parses"))
+            }
+            Ok(Some(Ok(_))) => {}
+            _ => return None,
+        }
+    }
+}
+
+async fn ws_register(port: i32, xff: &str, id: &str) -> Ws {
+    let mut ws = ws_via_proxy(port, xff).await;
+    let mut msg = RendezvousMessage::new();
+    msg.set_register_pk(RegisterPk {
+        id: id.to_owned(),
+        uuid: format!("uuid-{id}").into_bytes().into(),
+        pk: vec![7u8; 32].into(),
+        ..Default::default()
+    });
+    ws_send(&mut ws, msg).await;
+    match ws_reply(&mut ws, 3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::RegisterPkResponse(r))) => {
+            assert_eq!(r.result.enum_value(), Ok(register_pk_response::Result::OK), "{id} registers")
+        }
+        other => panic!("unexpected reply to RegisterPk: {other:?}"),
+    }
+    ws
+}
+
+async fn ws_punch_refused(port: i32, xff: &str, key: &str, target: &str) {
+    let mut ws = ws_via_proxy(port, xff).await;
+    let mut msg = RendezvousMessage::new();
+    msg.set_punch_hole_request(PunchHoleRequest {
+        id: target.to_owned(),
+        licence_key: key.to_owned(),
+        ..Default::default()
+    });
+    ws_send(&mut ws, msg).await;
+    match ws_reply(&mut ws, 3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::PunchHoleResponse(ph))) => {
+            assert!(ph.other_failure.contains(DENY_INCOMING_ONLY), "got {:?}", ph.other_failure)
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let mut ws = ws_via_proxy(port, xff).await;
+    let mut msg = RendezvousMessage::new();
+    msg.set_request_relay(RequestRelay {
+        id: target.to_owned(),
+        uuid: "u".into(),
+        ..Default::default()
+    });
+    ws_send(&mut ws, msg).await;
+    match ws_reply(&mut ws, 3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::RelayResponse(rr))) => {
+            assert!(rr.refuse_reason.contains(DENY_INCOMING_ONLY), "got {:?}", rr.refuse_reason)
+        }
+        other => panic!("expected a relay refusal, got {other:?}"),
+    }
+}
+
+/// WebSocket clients behind a trusted proxy are identified by the address the
+/// proxy names, for registration and for the policy check alike, so an
+/// incoming-only device cannot start sessions over WebSocket either, even after
+/// its single registration is older than the 30 second match window.
+#[tokio::test]
+async fn incoming_only_is_enforced_for_websocket_clients_behind_a_proxy() {
+    let (url, _console) = start_console(serde_json::json!({
+        "mode": "open", "allow": [], "incoming_only": ["wsp-kiosk"], "tokens": {}
+    }));
+    let dir = tempfile::tempdir().unwrap();
+    let (_hbbs, key) =
+        spawn_hbbs_env(dir.path(), PORT_WS_PROXY, Some(&url), &[("TRUSTED_PROXIES", "127.0.0.1/32")]);
+    wait_policy(PORT_WS_PROXY, "mode=open").await;
+
+    let mut kiosk = ws_register(PORT_WS_PROXY, "198.51.100.10", "wsp-kiosk").await;
+    let mut desk = ws_register(PORT_WS_PROXY, "198.51.100.20", "wsp-desk").await;
+
+    ws_punch_refused(PORT_WS_PROXY, "198.51.100.10", &key, "wsp-desk").await;
+    // A forged entry on the left does not help: the proxy's own is used.
+    ws_punch_refused(PORT_WS_PROXY, "198.51.100.20, 198.51.100.10", &key, "wsp-desk").await;
+
+    // desk -> kiosk is allowed and reaches the kiosk's registered stream.
+    let mut ws = ws_via_proxy(PORT_WS_PROXY, "198.51.100.20").await;
+    let mut msg = RendezvousMessage::new();
+    msg.set_punch_hole_request(PunchHoleRequest {
+        id: "wsp-kiosk".into(),
+        licence_key: key.clone(),
+        ..Default::default()
+    });
+    ws_send(&mut ws, msg).await;
+    let ph = match ws_reply(&mut kiosk, 3000).await.map(|m| m.union) {
+        Some(Some(rendezvous_message::Union::PunchHole(ph))) => ph,
+        other => panic!("kiosk should get the punch hole, got {other:?}"),
+    };
+    assert_eq!(ph.controlled_context.conn_audit_ref, "cd1/punch");
+    assert_eq!(AddrMangle::decode(&ph.socket_addr).ip().to_string(), "198.51.100.20");
+
+    // Heartbeats keep both registrations, and the kiosk's address match, alive.
+    let until = tokio::time::Instant::now() + Duration::from_secs(35);
+    while tokio::time::Instant::now() < until {
+        for ws in [&mut kiosk, &mut desk] {
+            let m = ws_reply(ws, 1000).await;
+            assert!(m.is_none(), "unexpected {m:?}");
+        }
+    }
+    ws_punch_refused(PORT_WS_PROXY, "198.51.100.10", &key, "wsp-desk").await;
 }

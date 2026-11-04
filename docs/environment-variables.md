@@ -42,6 +42,7 @@ in the inherited process environment.
 | `KEY` | `-k`, `--key` | `-` | Public key clients must use, a base64 secret key, or `-` / `_` to load or generate a key pair (`id_ed25519`, `id_ed25519.pub`). `-` and `_` have the same behavior, so explicitly passing `-k _` to `hbbs` is unnecessary. An explicitly empty value disables key validation; see [Keys](#keys-and-encryption). |
 | `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.1.** Local IPv4 or IPv6 address on which all `hbbs` TCP, UDP, and WebSocket listeners bind. This does not change the addresses advertised to clients. Supported by `--config`, `.env`, and the inherited environment. |
 | `PORT` | `-p`, `--port` | `21116` | Main TCP/UDP listening port. `hbbs` also binds `PORT-1` (NAT type test) and `PORT+2` (WebSocket). |
+| `TRUSTED_PROXIES` | `--trusted-proxies` | *(empty)* | **Available since 1.3.0.** Comma-separated CIDRs of reverse proxies in front of the WebSocket port (`PORT+2`), e.g. `127.0.0.1/32`. A connection from one of them is identified by `X-Forwarded-For`, read from the right: the first address that is not a listed proxy is the client. Empty trusts no one and ignores the header. `X-Real-IP` is never read. An invalid entry stops `hbbs`. Supported by `--config`, `.env`, and the inherited environment. |
 | `RELAY-SERVERS` | `-r`, `--relay-servers` | *(empty)* | Optional relay server override handed to clients, as comma-separated `host` or `host:port` values. Leave empty when `hbbr` uses the same address as `hbbs` and the standard port `21117`; clients derive it automatically. Set this only when the relay uses a different IP/hostname or a non-standard port. |
 | `RMEM` | `-M`, `--rmem` | `0` (system default) | UDP receive‑buffer size in bytes. Raise the OS limit first: `sudo sysctl -w net.core.rmem_max=52428800`. |
 | *(config file)* | `-c`, `--config` | *(none)* | Path to an extra INI config file (see precedence above). |
@@ -66,6 +67,7 @@ in the inherited process environment.
 | `KEY` | `-k`, `--key` | *(empty)* | The empty default intentionally disables relay key validation, avoiding key-pair setup and mismatch failures. To enable relay key validation, use the same non-empty key as `hbbs`; `-` / `_` have the same behavior and load or generate a key pair. An empty key allows clients without a matching key to use the relay, so choose this tradeoff deliberately on an exposed server. |
 | `BIND` | `-b`, `--bind` | all interfaces | **Available since 1.1.1.** Local IPv4 or IPv6 address on which the relay TCP and WebSocket listeners bind. Supported by `.env` and the inherited environment; `hbbr` does not support `--config`. |
 | `PORT` | `-p`, `--port` | `21117` | Relay listening port. `hbbr` also binds `PORT+2` for WebSocket relay. **Note:** when set via the `PORT` env var (not `-p`), `hbbr` listens on `PORT + 1`, so a shared `PORT=21116` makes `hbbs`=21116 and `hbbr`=21117. |
+| `TRUSTED_PROXIES` | `--trusted-proxies` | *(empty)* | **Available since 1.3.0.** As for `hbbs`, for the WebSocket relay port (`PORT+2`). Set it on `hbbr` too: each server reads its own. Supported by `.env` and the inherited environment. |
 
 ### Relay bandwidth / QoS
 
@@ -237,9 +239,9 @@ services:
 ```
 
 Leave 21118/21119 (WebSocket) unpublished unless you have RustDesk clients in
-WebSocket mode. Then put them behind a reverse proxy that sets `X-Real-IP`:
-hbbs and hbbr take the client address from that header on WebSocket
-connections, so a directly exposed port lets a client claim any address.
+WebSocket mode. Then put them behind a TLS reverse proxy and list its address
+in `TRUSTED_PROXIES`, so hbbs and hbbr take the client address from its
+`X-Forwarded-For`. See the README, "WebSocket desktop clients".
 
 
 ### systemd
@@ -263,10 +265,10 @@ ExecStart=/usr/bin/hbbs
 | 21118 | TCP | hbbs | WebSocket rendezvous (`PORT+2`) |
 | 21119 | TCP | hbbr | WebSocket relay (`hbbr PORT+2`) |
 
-Ports 21118/21119 are only needed for the web client; you can omit them
-otherwise.
+Ports 21118/21119 are only needed for the web client and for desktop clients
+in WebSocket mode; you can omit them otherwise.
 
-On those two ports both servers take the client address from the `X-Real-IP` or
-`X-Forwarded-For` header when one is present, without checking it (upstream
-issue #634). Put them behind a reverse proxy that sets these headers, and do not
-let clients reach them directly. The device policy does not use these headers.
+Since 1.3.0 both servers use `X-Forwarded-For` on those two ports only from a
+proxy listed in `TRUSTED_PROXIES`, and never `X-Real-IP`. Before 1.3.0 they took
+either header from anyone (upstream issue #634). The address found this way is
+the one registration, rate limits and the device policy use.
