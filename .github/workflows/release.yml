@@ -30,6 +30,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # GitHub's own "Source code" downloads leave out the hbb_common submodule and
+  # cannot be built. This attaches one that can.
+  source:
+    name: Source tarball
+    if: github.event_name == 'release'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Attach the source, with submodules, to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -eu
+          name="cortendesk-server-${TAG}-src"
+          export prefix="cortendesk-server-${TAG}/"
+          git archive --format=tar --prefix="$prefix" -o "$RUNNER_TEMP/src.tar" HEAD
+          git submodule foreach --recursive --quiet \
+            'git archive --format=tar --prefix="$prefix$displaypath/" -o "$RUNNER_TEMP/sub.tar" HEAD && tar --concatenate -f "$RUNNER_TEMP/src.tar" "$RUNNER_TEMP/sub.tar"'
+          gzip -9n < "$RUNNER_TEMP/src.tar" > "$name.tar.gz"
+          tar -tzf "$name.tar.gz" | grep -qx "${prefix}libs/hbb_common/Cargo.toml"
+          gh release upload "$TAG" "$name.tar.gz" --clobber
+
   build:
     name: Build ${{ matrix.arch }}
     needs: test

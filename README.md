@@ -91,7 +91,10 @@ connections, so a directly exposed port lets a client claim any address.
 
 Also published to `docker.io/marcpope/cortendesk-server`. Static `linux/amd64`
 and `linux/arm64` binaries are attached to each
-[release](https://github.com/marcpope/cortendesk-server/releases).
+[release](https://github.com/marcpope/cortendesk-server/releases), with
+`cortendesk-server-vX.Y.Z-src.tar.gz`, the complete source including the
+`libs/hbb_common` submodule. GitHub's own "Source code" archives leave the
+submodule out and do not build.
 
 ### Coming from rustdesk-server
 

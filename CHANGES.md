@@ -16,6 +16,17 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### Release source tarball with submodules (2026-11-04)
+
+Issue #16. Reported upstream by @SecurityCze, rustdesk-server issue 701.
+
+- `.github/workflows/release.yml` has a new `source` job that, for a published
+  release, attaches `cortendesk-server-<tag>-src.tar.gz`: the tagged tree and
+  the `libs/hbb_common` submodule, under one top directory. GitHub's own
+  "Source code" archives leave the submodule out and cannot be built. The
+  other jobs are unchanged.
+- README: the tarball, under Running it.
+
 ### Build script without hbb_common (2026-11-04)
 
 Issue #15. Based on a change proposed upstream by @luminoso, rustdesk-server
