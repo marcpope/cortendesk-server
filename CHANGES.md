@@ -14,7 +14,7 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
-## 1.3.1 (unreleased)
+## 1.4.0 (unreleased)
 
 ### CodeQL: skip hbb_common; device uuids no longer logged (2026-11-04)
 

@@ -124,7 +124,7 @@ replies.
 
 Many machines behind one public IP: `hbbs` lets one IP register 300 distinct
 IDs a day and 30 registrations in a row, after which new machines from it stay
-offline ("ID does not exist"). Since 1.3.1 both are settings:
+offline ("ID does not exist"). Since 1.4.0 both are settings:
 `MAX_NEW_IDS_PER_IP` / `--max-new-ids-per-ip` and
 `MAX_REGISTER_BURST_PER_IP` / `--max-register-burst-per-ip`.
 
