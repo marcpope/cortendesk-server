@@ -16,6 +16,24 @@ of upstream so the two are never mistaken for each other.
 
 ## 1.3.1 (unreleased)
 
+### hbbs: `release-id` admin command (2026-11-04)
+
+Issue #19. Requested upstream by @shahidullahr, rustdesk-server issue 483.
+
+- `release-id <id>` / `rid <id>` on the loopback admin console deletes the
+  device from the database and from memory and closes its WebSocket or TCP
+  registration, so another machine can register the ID. Before, a reinstalled
+  machine could not take back its custom ID: the old entry kept it, and the
+  only fix was editing `db_v2.sqlite3` with `hbbs` stopped.
+- It waits for any registration of that ID in progress, under the same per-ID
+  lock.
+- One line back: `OK <id>`, `OK <id> online` (it was online and may register
+  again at once if that machine still runs), `NOT_FOUND <id>` or
+  `ERROR <reason>`. For the CortenDesk console's "Release ID" button.
+- README (Configuration) and `docs/environment-variables.md` (Runtime console).
+- Test in `tests/admin_console.rs`: a live registration released and taken by
+  another machine, then a database-only one after a restart.
+
 ### hbbs: one failed UDP reply no longer rebuilds the UDP socket (2026-11-04)
 
 Issue #9. Based on a fix proposed upstream by @jahvari, rustdesk-server

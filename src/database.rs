@@ -1,3 +1,7 @@
+// Modified by the CortenDesk Server project on 2026-11-04: `delete_peer`, for
+// releasing an ID. See CHANGES.md. This file is part of a modified version of
+// rustdesk-server, distributed under the AGPL-3.0 like the original.
+
 use async_trait::async_trait;
 use hbb_common::{log, ResultType};
 use sqlx::{
@@ -121,6 +125,15 @@ impl Database {
         .execute(self.pool.get().await?.deref_mut())
         .await?;
         Ok(guid)
+    }
+
+    /// Delete the peer that owns `id`. Whether there was one.
+    pub async fn delete_peer(&self, id: &str) -> ResultType<bool> {
+        let done = sqlx::query("delete from peer where id = ?")
+            .bind(id)
+            .execute(self.pool.get().await?.deref_mut())
+            .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     pub async fn update_pk(

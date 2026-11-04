@@ -120,11 +120,26 @@ printf 'always-use-relay Y' | nc 127.0.0.1 21115
 # hbbs: show the device policy state
 printf 'policy' | nc 127.0.0.1 21115
 
+# hbbs: forget a device so another machine can take its ID (since 1.4.0)
+printf 'release-id 123456789' | nc 127.0.0.1 21115
+
 # hbbr: list commands on its relay PORT (21117 by default)
 printf 'h' | nc 127.0.0.1 21117
 ```
 
 Use the corresponding configured ports if you changed `PORT`.
+
+`release-id <id>` (short: `rid`) deletes the device from `db_v2.sqlite3` and
+from memory, and closes its WebSocket or TCP registration if it has one. Use it
+when a reinstalled machine cannot take back its ID because the old entry still
+owns it. It answers one line:
+
+| Reply | Meaning |
+|---|---|
+| `OK <id>` | Released. It was not online. |
+| `OK <id> online` | Released. It was online; if that machine still runs, it registers the ID again within seconds. |
+| `NOT_FOUND <id>` | No device has that ID. |
+| `ERROR <reason>` | Nothing was changed: no ID was given, or the database failed (also logged). |
 
 ---
 

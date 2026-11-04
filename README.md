@@ -116,6 +116,12 @@ servers take `-b` / `BIND` to listen on one local IPv4 or IPv6 address instead
 of all interfaces. Every option is in
 [docs/environment-variables.md](docs/environment-variables.md).
 
+Releasing an ID: when a reinstalled machine cannot take back its ID, send
+`release-id <id>` to `hbbs`'s loopback admin console (`PORT-1`, 21115 by
+default), for example `printf 'release-id 123456789' | nc 127.0.0.1 21115`.
+See [Runtime console](docs/environment-variables.md#runtime-console) for the
+replies.
+
 Many machines behind one public IP: `hbbs` lets one IP register 300 distinct
 IDs a day and 30 registrations in a row, after which new machines from it stay
 offline ("ID does not exist"). Since 1.3.1 both are settings:

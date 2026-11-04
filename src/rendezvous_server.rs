@@ -13,7 +13,8 @@
 // capped and peer IDs are at most 253 bytes; a key file error stops `hbbs`;
 // signalling messages are at most 1 MiB; whole admin console replies; the UDP
 // self-test survives failed sends; configurable per-IP registration limits; a
-// failed UDP reply no longer rebuilds the UDP socket. See CHANGES.md.
+// failed UDP reply no longer rebuilds the UDP socket; the `release-id` admin
+// command. See CHANGES.md.
 // This file is part of a modified version of rustdesk-server, distributed under
 // the AGPL-3.0 like the original.
 
@@ -1503,6 +1504,34 @@ impl RendezvousServer {
         true
     }
 
+    /// The `release-id` admin command: forget a peer so another machine can
+    /// take its ID (issue #19). One line back: `OK <id>`, `OK <id> online` when
+    /// it was online (it may register again at once if it still runs),
+    /// `NOT_FOUND <id>`, or `ERROR <reason>`.
+    async fn release_id(&self, id: &str) -> String {
+        // Not while a registration of this ID is in progress.
+        let lock = self.registration_locks.get(id);
+        let guard = lock.clone().lock_owned().await;
+        let result = self.pm.release(id).await;
+        drop(guard);
+        self.registration_locks.release(id, lock);
+        match result {
+            Ok(Some(online)) => {
+                log::info!("Released ID {} (online: {})", id, online);
+                if online {
+                    format!("OK {id} online\n")
+                } else {
+                    format!("OK {id}\n")
+                }
+            }
+            Ok(None) => format!("NOT_FOUND {id}\n"),
+            Err(err) => {
+                log::error!("Failed to release ID {}: {}", id, err);
+                format!("ERROR {}\n", err.to_string().replace('\n', " "))
+            }
+        }
+    }
+
     fn parse_relay_servers(&mut self, relay_servers: &str) {
         let rs = get_servers(relay_servers, "relay-servers");
         self.relay_servers0 = Arc::new(rs);
@@ -1527,7 +1556,7 @@ impl RendezvousServer {
         match fds.next() {
             Some("h") => {
                 res = format!(
-                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+                    "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
                     "relay-servers(rs) <separated by ,>",
                     "reload-geo(rg)",
                     "ip-blocker(ib) [<ip>|<number>] [-]",
@@ -1535,8 +1564,15 @@ impl RendezvousServer {
                     "punch-requests(pr) [<number>] [-]",
                     "always-use-relay(aur) [Y|N]",
                     "test-geo(tg) <ip1> <ip2>",
-                    "policy(pol)"
+                    "policy(pol)",
+                    "release-id(rid) <id>"
                 )
+            }
+            Some("release-id" | "rid") => {
+                res = match fds.next().filter(|id| !id.is_empty()) {
+                    None => "ERROR usage: release-id <id>\n".to_owned(),
+                    Some(id) => self.release_id(id).await,
+                };
             }
             Some("relay-servers" | "rs") => {
                 if let Some(rs) = fds.next() {

@@ -1,6 +1,6 @@
 // Modified by the CortenDesk Server project on 2026-11-03: registration over a
 // persistent TCP or WebSocket stream (`Peer::stream`), based on PR #1 by
-// vk2amv. Modified on 2026-11-04: `MAX_PEER_ID_LEN`. See
+// vk2amv. Modified on 2026-11-04: `MAX_PEER_ID_LEN`; `PeerMap::release`. See
 // CHANGES.md. This file is part of a modified version of rustdesk-server,
 // distributed under the AGPL-3.0 like the original.
 
@@ -197,6 +197,23 @@ impl PeerMap {
         let tmp = LockPeer::default();
         w.insert(id.to_owned(), tmp.clone());
         tmp
+    }
+
+    /// Forget `id`, in the database and in memory, and close its stream
+    /// registration if it has one, so another machine can register it.
+    /// `None` when there was nothing to forget, else whether it was online.
+    pub(crate) async fn release(&self, id: &str) -> ResultType<Option<bool>> {
+        let deleted = self.db.delete_peer(id).await?;
+        let removed = self.map.write().await.remove(id);
+        let mut online = false;
+        if let Some(peer) = removed.as_ref() {
+            let mut peer = peer.write().await;
+            online = peer.endpoint().is_some();
+            if let Some(registration) = peer.stream.take() {
+                registration.connection.close();
+            }
+        }
+        Ok((deleted || removed.is_some()).then_some(online))
     }
 
     #[inline]
