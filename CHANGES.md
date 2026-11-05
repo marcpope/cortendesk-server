@@ -14,6 +14,20 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
+## Unreleased
+
+### hbbs: relay uuids checked before forwarding (2026-11-05)
+
+- `RequestRelay` and `RelayResponse` with a uuid that is empty, longer than
+  128 bytes, or has anything but ASCII letters, digits, `-` and `_` are
+  dropped (issue #21). The peer sends the uuid on to the relay server the
+  message names, so line breaks or control bytes could otherwise reach that
+  service as is. A `RelayResponse` with both uuid and relay server empty (a
+  peer's ack) still passes. Upstream rustdesk-server added the same check on
+  2026-11-04, and RustDesk clients now refuse the same uuids themselves.
+- The drop is logged with the uuid's length, not the uuid.
+- `src/rendezvous_server.rs`: `validate_relay_uuid`, `validate_relay_response`.
+
 ## 1.5.0 (2026-11-04)
 
 ### hbbs: share link tickets reach one device only (2026-11-04)
