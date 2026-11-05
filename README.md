@@ -198,8 +198,8 @@ A connection request names the device to reach, not the device asking. `hbbs`
 identifies the sender by, in order:
 
 1. a ticket signed with the shared secret, which the console's web client sends.
-   A share link's ticket (`cdw2`) names one device and admits requests to that
-   device only;
+   A share link's ticket (`cdw2`, since 1.5.0) names one device and admits
+   requests to that device only;
 2. the console access token a signed-in RustDesk client sends;
 3. its IP address, matched against devices that registered from that address
    in the last 30 seconds, not counting the target. On WebSocket through a

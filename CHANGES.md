@@ -14,7 +14,7 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
-## Unreleased
+## 1.5.0 (2026-11-04)
 
 ### hbbs: share link tickets reach one device only (2026-11-04)
 
