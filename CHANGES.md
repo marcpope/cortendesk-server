@@ -16,6 +16,16 @@ of upstream so the two are never mistaken for each other.
 
 ## Unreleased
 
+### hbbs: share link tickets reach one device only (2026-11-04)
+
+- New ticket form `cdw2.<expiry>.<target>.<subject>.<hmac>` for the
+  console's share links (console PR #142). `hbbs` admits it only for a punch
+  hole or relay request to the device it names, so someone holding a share
+  link cannot use its ticket to reach any other device. `cdw1` tickets are
+  unchanged. Older `hbbs` does not know `cdw2` and treats it like no ticket:
+  share links then work in open mode only.
+- `src/policy.rs`: `ticket_valid` takes the request's target.
+
 ### hbbr: relay session uuids no longer logged (2026-11-04)
 
 - The "New relay request" and "got paired" lines log the client address

@@ -12,7 +12,7 @@
 //!
 //! Who is asking: a punch hole or relay request names only the target. The
 //! initiator is identified, in order, by a console-signed web client ticket in
-//! `token`, by the client's console access token (`token`, sent by signed-in
+//! `token` (a share link's ticket names the one device it may reach), by the client's console access token (`token`, sent by signed-in
 //! clients), or by its public IP matched against peers registered from that IP
 //! in the last 30 seconds.
 
@@ -35,6 +35,8 @@ const REG_WINDOW: Duration = Duration::from_secs(30);
 const LOCAL_ADDR_RESEND: Duration = Duration::from_secs(600);
 const MAX_PENDING_REPORTS: usize = 5000;
 const TICKET_PREFIX: &str = "cdw1";
+/// A ticket bound to one target device (console share links).
+const BOUND_TICKET_PREFIX: &str = "cdw2";
 
 pub const DENY_UNAPPROVED: &str =
     "This device is not approved on this server, so it cannot start sessions. Ask your administrator to approve it.";
@@ -183,20 +185,30 @@ fn prune_seen() {
     by_id.retain(|id, ip| by_ip.get(ip).map_or(false, |ids| ids.contains_key(id)));
 }
 
-/// A console-signed ticket for its own web client: `cdw1.<expiry>.<subject>.<hmac>`.
-fn ticket_valid(token: &str, secret: &str) -> bool {
-    if secret.is_empty() || !token.starts_with(TICKET_PREFIX) {
+/// A console-signed ticket for its own web client, for a session to `target`.
+///
+/// `cdw1.<expiry>.<subject>.<hmac>` admits any target: a signed-in console
+/// user picks the device. `cdw2.<expiry>.<target>.<subject>.<hmac>` admits
+/// only the device it names: a share link hands it to someone without an
+/// account, who must not be able to reach any other device with it.
+fn ticket_valid(token: &str, secret: &str, target: &str) -> bool {
+    if secret.is_empty() {
         return false;
     }
     let Some((signed, sig)) = token.rsplit_once('.') else { return false };
     let mut parts = signed.split('.');
-    if parts.next() != Some(TICKET_PREFIX) {
-        return false;
-    }
+    let bound = match parts.next() {
+        Some(TICKET_PREFIX) => false,
+        Some(BOUND_TICKET_PREFIX) => true,
+        _ => return false,
+    };
     let Some(expiry) = parts.next().and_then(|x| x.parse::<u64>().ok()) else {
         return false;
     };
     if expiry < now_secs() {
+        return false;
+    }
+    if bound && (target.is_empty() || parts.next() != Some(target)) {
         return false;
     }
     let mut state = hmacsha256::State::init(secret.as_bytes());
@@ -226,7 +238,7 @@ pub fn check_initiator(token: &str, ip: IpAddr, target: &str) -> Result<(), &'st
         Err(_) => return Ok(()),
     };
     if !token.is_empty() {
-        if ticket_valid(token, &secret) {
+        if ticket_valid(token, &secret, target) {
             return Ok(());
         }
         if let Some(id) = snap.tokens.get(&hex(&sha256::hash(token.as_bytes()).0)) {
@@ -509,15 +521,33 @@ mod tests {
         let exp = now_secs() + 60;
         let signed = format!("cdw1.{exp}.web-1");
         let good = format!("{signed}.{}", sign("s3cret", &signed));
-        assert!(ticket_valid(&good, "s3cret"));
-        assert!(!ticket_valid(&good, "other"));
-        assert!(!ticket_valid(&good, ""));
-        assert!(!ticket_valid(&good.replace("web-1", "web-2"), "s3cret"));
+        assert!(ticket_valid(&good, "s3cret", "any-device"));
+        assert!(!ticket_valid(&good, "other", "any-device"));
+        assert!(!ticket_valid(&good, "", "any-device"));
+        assert!(!ticket_valid(&good.replace("web-1", "web-2"), "s3cret", "any-device"));
 
         let old = format!("cdw1.{}.web-1", now_secs() - 1);
-        assert!(!ticket_valid(&format!("{old}.{}", sign("s3cret", &old)), "s3cret"));
-        assert!(!ticket_valid("cdw1.garbage", "s3cret"));
-        assert!(!ticket_valid("an-ordinary-access-token", "s3cret"));
+        assert!(!ticket_valid(&format!("{old}.{}", sign("s3cret", &old)), "s3cret", "any-device"));
+        assert!(!ticket_valid("cdw1.garbage", "s3cret", "any-device"));
+        assert!(!ticket_valid("an-ordinary-access-token", "s3cret", "any-device"));
+    }
+
+    #[test]
+    fn bound_ticket_admits_only_its_target() {
+        let exp = now_secs() + 60;
+        let signed = format!("cdw2.{exp}.123456789.share-7");
+        let good = format!("{signed}.{}", sign("s3cret", &signed));
+        assert!(ticket_valid(&good, "s3cret", "123456789"));
+        assert!(!ticket_valid(&good, "s3cret", "987654321"));
+        assert!(!ticket_valid(&good, "s3cret", ""));
+        assert!(!ticket_valid(&good, "other", "123456789"));
+        // The target is signed: swapping it breaks the HMAC.
+        assert!(!ticket_valid(&good.replace("123456789", "987654321"), "s3cret", "987654321"));
+
+        let old = format!("cdw2.{}.123456789.share-7", now_secs() - 1);
+        assert!(!ticket_valid(&format!("{old}.{}", sign("s3cret", &old)), "s3cret", "123456789"));
+        // A bound ticket relabelled as cdw1 fails the HMAC too.
+        assert!(!ticket_valid(&good.replacen("cdw2", "cdw1", 1), "s3cret", "987654321"));
     }
 
     #[test]
