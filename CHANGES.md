@@ -14,7 +14,7 @@ of upstream so the two are never mistaken for each other.
 
 ---
 
-## Unreleased
+## 1.5.1 (2026-11-05)
 
 ### hbbs: relay uuids checked before forwarding (2026-11-05)
 
